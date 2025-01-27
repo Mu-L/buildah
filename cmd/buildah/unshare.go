@@ -1,5 +1,4 @@
 //go:build linux
-// +build linux
 
 package main
 
@@ -7,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/containers/storage"
 	"github.com/containers/storage/pkg/unshare"
+	"github.com/moby/sys/capability"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -125,4 +126,24 @@ func unshareCmd(c *cobra.Command, args []string) error {
 	unshare.ExecRunnable(cmd, unmountMounts)
 	os.Exit(1)
 	return nil
+}
+
+func debugCapabilities() {
+	pid, err := capability.NewPid2(0)
+	if err != nil {
+		logrus.Errorf("error checking our capabilities: %v", err)
+		return
+	}
+	if err := pid.Load(); err != nil {
+		logrus.Errorf("error loading our current capabilities: %v", err)
+		return
+	}
+	knownCaps := capability.ListKnown()
+	effective := make([]string, 0, len(knownCaps))
+	for i := range knownCaps {
+		have := pid.Get(capability.EFFECTIVE, knownCaps[i])
+		effective = append(effective, fmt.Sprintf("%s=%v", knownCaps[i].String(), have))
+	}
+	sort.Strings(effective)
+	logrus.Debugf("effective capabilities: %v", effective)
 }

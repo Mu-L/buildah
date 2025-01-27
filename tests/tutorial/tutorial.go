@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
@@ -22,7 +21,7 @@ func main() {
 	}
 	unshare.MaybeReexecUsingUserNamespace(false)
 
-	buildStoreOptions, err := storage.DefaultStoreOptions(unshare.IsRootless(), unshare.GetRootlessUID())
+	buildStoreOptions, err := storage.DefaultStoreOptions()
 	if err != nil {
 		panic(err)
 	}
@@ -39,7 +38,7 @@ func main() {
 		}
 	}()
 
-	d, err := ioutil.TempDir("", "")
+	d, err := os.MkdirTemp("", "")
 	if err != nil {
 		panic(err)
 	}

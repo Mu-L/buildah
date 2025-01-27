@@ -7,31 +7,37 @@ import (
 	"strings"
 
 	"github.com/containers/buildah"
-	internalParse "github.com/containers/buildah/internal/parse"
+	"github.com/containers/buildah/internal/tmpdir"
+	"github.com/containers/buildah/internal/volumes"
 	buildahcli "github.com/containers/buildah/pkg/cli"
+	"github.com/containers/buildah/pkg/overlay"
 	"github.com/containers/buildah/pkg/parse"
 	"github.com/containers/buildah/util"
+	"github.com/containers/storage/pkg/mount"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
 type runInputOptions struct {
-	addHistory  bool
-	capAdd      []string
-	capDrop     []string
-	contextDir  string
-	env         []string
-	hostname    string
-	isolation   string
-	mounts      []string
-	runtime     string
-	runtimeFlag []string
-	noHosts     bool
-	noPivot     bool
-	terminal    bool
-	volumes     []string
-	workingDir  string
+	addHistory   bool
+	capAdd       []string
+	capDrop      []string
+	cdiConfigDir string
+	contextDir   string
+	devices      []string
+	env          []string
+	hostname     string
+	isolation    string
+	mounts       []string
+	runtime      string
+	runtimeFlag  []string
+	noHostname   bool
+	noHosts      bool
+	noPivot      bool
+	terminal     bool
+	volumes      []string
+	workingDir   string
 	*buildahcli.NameSpaceResults
 }
 
@@ -50,7 +56,6 @@ func init() {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.NameSpaceResults = &namespaceResults
 			return runCmd(cmd, args, opts)
-
 		},
 		Example: `buildah run containerID -- ps -auxw
   buildah run --terminal containerID /bin/bash
@@ -63,13 +68,17 @@ func init() {
 	flags.BoolVar(&opts.addHistory, "add-history", false, "add an entry for this operation to the image's history.  Use BUILDAH_HISTORY environment variable to override. (default false)")
 	flags.StringSliceVar(&opts.capAdd, "cap-add", []string{}, "add the specified capability (default [])")
 	flags.StringSliceVar(&opts.capDrop, "cap-drop", []string{}, "drop the specified capability (default [])")
+	flags.StringVar(&opts.cdiConfigDir, "cdi-config-dir", "", "`directory` of CDI configuration files")
+	_ = flags.MarkHidden("cdi-config-dir")
 	flags.StringVar(&opts.contextDir, "contextdir", "", "context directory path")
+	flags.StringArrayVar(&opts.devices, "device", []string{}, "additional devices to provide")
 	flags.StringArrayVarP(&opts.env, "env", "e", []string{}, "add environment variable to be set temporarily when running command (default [])")
 	flags.StringVar(&opts.hostname, "hostname", "", "set the hostname inside of the container")
 	flags.StringVar(&opts.isolation, "isolation", "", "`type` of process isolation to use. Use BUILDAH_ISOLATION environment variable to override.")
 	// Do not set a default runtime here, we'll do that later in the processing.
 	flags.StringVar(&opts.runtime, "runtime", util.Runtime(), "`path` to an alternate OCI runtime")
 	flags.StringSliceVar(&opts.runtimeFlag, "runtime-flag", []string{}, "add global flags for the container runtime")
+	flags.BoolVar(&opts.noHostname, "no-hostname", false, "do not override the /etc/hostname file within the container")
 	flags.BoolVar(&opts.noHosts, "no-hosts", false, "do not override the /etc/hosts file within the container")
 	flags.BoolVar(&opts.noPivot, "no-pivot", false, "do not use pivot root to jail process inside rootfs")
 	flags.BoolVarP(&opts.terminal, "terminal", "t", false, "allocate a pseudo-TTY in the container")
@@ -100,6 +109,16 @@ func runCmd(c *cobra.Command, args []string, iopts runInputOptions) error {
 	if len(args) == 0 {
 		return errors.New("command must be specified")
 	}
+
+	tmpDir, err := os.MkdirTemp(tmpdir.GetTempDir(), "buildahvolume")
+	if err != nil {
+		return fmt.Errorf("creating temporary directory: %w", err)
+	}
+	defer func() {
+		if err := os.Remove(tmpDir); err != nil {
+			logrus.Debugf("removing should-be-empty temporary directory %q: %v", tmpDir, err)
+		}
+	}()
 
 	store, err := getStore(c)
 	if err != nil {
@@ -141,6 +160,7 @@ func runCmd(c *cobra.Command, args []string, iopts runInputOptions) error {
 		Hostname:         iopts.hostname,
 		Runtime:          iopts.runtime,
 		Args:             runtimeFlags,
+		NoHostname:       iopts.noHostname,
 		NoHosts:          iopts.noHosts,
 		NoPivot:          noPivot,
 		User:             c.Flag("user").Value.String(),
@@ -152,8 +172,9 @@ func runCmd(c *cobra.Command, args []string, iopts runInputOptions) error {
 		CNIConfigDir:     iopts.CNIConfigDir,
 		AddCapabilities:  iopts.capAdd,
 		DropCapabilities: iopts.capDrop,
-		Env:              iopts.env,
 		WorkingDir:       iopts.workingDir,
+		DeviceSpecs:      iopts.devices,
+		CDIConfigDir:     iopts.cdiConfigDir,
 	}
 
 	if c.Flag("terminal").Changed {
@@ -164,18 +185,36 @@ func runCmd(c *cobra.Command, args []string, iopts runInputOptions) error {
 		}
 	}
 
+	options.Env = buildahcli.LookupEnvVarReferences(iopts.env, os.Environ())
+
 	systemContext, err := parse.SystemContextFromOptions(c)
 	if err != nil {
 		return fmt.Errorf("building system context: %w", err)
 	}
-	mounts, mountedImages, targetLocks, err := internalParse.GetVolumes(systemContext, store, iopts.volumes, iopts.mounts, iopts.contextDir)
+	mounts, mountedImages, intermediateMounts, _, targetLocks, err := volumes.GetVolumes(systemContext, store, builder.MountLabel, iopts.volumes, iopts.mounts, iopts.contextDir, builder.IDMappingOptions, iopts.workingDir, tmpDir)
 	if err != nil {
 		return err
 	}
-	defer internalParse.UnlockLockArray(targetLocks)
+	defer func() {
+		if err := overlay.CleanupContent(tmpDir); err != nil {
+			logrus.Debugf("unmounting overlay mounts under %q: %v", tmpDir, err)
+		}
+		for _, intermediateMount := range intermediateMounts {
+			if err := mount.Unmount(intermediateMount); err != nil {
+				logrus.Debugf("unmounting mount %q: %v", intermediateMount, err)
+			}
+			if err := os.Remove(intermediateMount); err != nil {
+				logrus.Debugf("removing should-be-empty mount directory %q: %v", intermediateMount, err)
+			}
+		}
+		for _, mountedImage := range mountedImages {
+			if _, err := store.UnmountImage(mountedImage, false); err != nil {
+				logrus.Debugf("unmounting image %q: %v", mountedImage, err)
+			}
+		}
+		volumes.UnlockLockArray(targetLocks)
+	}()
 	options.Mounts = mounts
-	// Run() will automatically clean them up.
-	options.ExternalImageMounts = mountedImages
 	options.CgroupManager = globalFlagResults.CgroupManager
 
 	runerr := builder.Run(args, options)

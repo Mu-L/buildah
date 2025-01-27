@@ -1,5 +1,4 @@
-//go:build linux || freebsd
-// +build linux freebsd
+//go:build (linux || freebsd) && cni
 
 package cni
 
@@ -8,16 +7,20 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 
 	internalutil "github.com/containers/common/libnetwork/internal/util"
 	"github.com/containers/common/libnetwork/types"
-	pkgutil "github.com/containers/common/pkg/util"
 	"github.com/sirupsen/logrus"
 )
 
+func (n *cniNetwork) NetworkUpdate(_ string, _ types.NetworkUpdateOptions) error {
+	return fmt.Errorf("NetworkUpdate is not supported for backend CNI: %w", types.ErrInvalidArg)
+}
+
 // NetworkCreate will take a partial filled Network and fill the
 // missing fields. It creates the Network and returns the full Network.
-func (n *cniNetwork) NetworkCreate(net types.Network) (types.Network, error) {
+func (n *cniNetwork) NetworkCreate(net types.Network, options *types.NetworkCreateOptions) (types.Network, error) {
 	n.lock.Lock()
 	defer n.lock.Unlock()
 	err := n.loadNetworks()
@@ -26,6 +29,11 @@ func (n *cniNetwork) NetworkCreate(net types.Network) (types.Network, error) {
 	}
 	network, err := n.networkCreate(&net, false)
 	if err != nil {
+		if options != nil && options.IgnoreIfExists && errors.Is(err, types.ErrNetworkExists) {
+			if network, ok := n.networks[net.Name]; ok {
+				return *network.libpodNet, nil
+			}
+		}
 		return types.Network{}, err
 	}
 	// add the new network to the map
@@ -77,6 +85,7 @@ func (n *cniNetwork) networkCreate(newNetwork *types.Network, defaultNet bool) (
 
 	switch newNetwork.Driver {
 	case types.BridgeNetworkDriver:
+		internalutil.MapDockerBridgeDriverOptions(newNetwork)
 		err = internalutil.CreateBridge(n, newNetwork, usedNetworks, n.defaultsubnetPools)
 		if err != nil {
 			return nil, err
@@ -196,7 +205,7 @@ func createIPMACVLAN(network *types.Network) error {
 		if err != nil {
 			return err
 		}
-		if !pkgutil.StringInSlice(network.NetworkInterface, interfaceNames) {
+		if !slices.Contains(interfaceNames, network.NetworkInterface) {
 			return fmt.Errorf("parent interface %s does not exist", network.NetworkInterface)
 		}
 	}

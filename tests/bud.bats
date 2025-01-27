@@ -8,7 +8,200 @@ load helpers
 }
 
 @test "bud stdio is usable pipes" {
+  _prefetch alpine
   run_buildah build $BUDFILES/stdio
+}
+
+@test "bud: build manifest list and --add-compression zstd" {
+  start_registry
+  run_buildah login --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth --username testuser --password testpassword localhost:${REGISTRY_PORT}
+
+  imgname="img-$(safename)"
+  run_buildah build $WITH_POLICY_JSON -t "${imgname}1" --platform linux/amd64 -f $BUDFILES/dockerfile/Dockerfile
+  run_buildah build $WITH_POLICY_JSON -t "${imgname}2" --platform linux/arm64 -f $BUDFILES/dockerfile/Dockerfile
+
+  run_buildah manifest create foo
+  run_buildah manifest add foo "${imgname}1"
+  run_buildah manifest add foo "${imgname}2"
+
+  run_buildah manifest push $WITH_POLICY_JSON --authfile ${TEST_SCRATCH_DIR}/test.auth --all --add-compression zstd --tls-verify=false foo docker://localhost:${REGISTRY_PORT}/list
+
+  run_buildah manifest inspect --authfile ${TEST_SCRATCH_DIR}/test.auth --tls-verify=false localhost:${REGISTRY_PORT}/list
+  list="$output"
+
+  validate_instance_compression "0" "$list" "amd64" "gzip"
+  validate_instance_compression "1" "$list" "arm64" "gzip"
+  validate_instance_compression "2" "$list" "amd64" "zstd"
+  validate_instance_compression "3" "$list" "arm64" "zstd"
+}
+
+@test "bud: build manifest list and --add-compression with containers.conf" {
+  local contextdir=${TEST_SCRATCH_DIR}/bud/platform
+  mkdir -p $contextdir
+
+  cat > $contextdir/Dockerfile1 << _EOF
+FROM alpine
+_EOF
+
+  cat > $contextdir/containers.conf << _EOF
+[engine]
+add_compression = ["zstd"]
+_EOF
+
+  start_registry
+  run_buildah login --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth --username testuser --password testpassword localhost:${REGISTRY_PORT}
+
+  imgname="img-$(safename)"
+  run_buildah build $WITH_POLICY_JSON -t "${imgname}1" --platform linux/amd64 -f $contextdir/Dockerfile1
+  run_buildah build $WITH_POLICY_JSON -t "${imgname}2" --platform linux/arm64 -f $contextdir/Dockerfile1
+
+  run_buildah manifest create foo
+  run_buildah manifest add foo "${imgname}1"
+  run_buildah manifest add foo "${imgname}2"
+
+  CONTAINERS_CONF=$contextdir/containers.conf run_buildah manifest push $WITH_POLICY_JSON --authfile ${TEST_SCRATCH_DIR}/test.auth --all --tls-verify=false foo docker://localhost:${REGISTRY_PORT}/list
+
+  run_buildah manifest inspect --authfile ${TEST_SCRATCH_DIR}/test.auth --tls-verify=false localhost:${REGISTRY_PORT}/list
+  list="$output"
+
+  validate_instance_compression "0" "$list" "amd64" "gzip"
+  validate_instance_compression "1" "$list" "arm64" "gzip"
+  validate_instance_compression "2" "$list" "amd64" "zstd"
+  validate_instance_compression "3" "$list" "arm64" "zstd"
+}
+
+@test "bud: build manifest list with --add-compression zstd, --compression and --force-compression" {
+  local contextdir=${TEST_SCRATCH_DIR}/bud/platform
+  mkdir -p $contextdir
+
+  cat > $contextdir/Dockerfile1 << _EOF
+FROM alpine
+_EOF
+
+  start_registry
+  run_buildah login --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth --username testuser --password testpassword localhost:${REGISTRY_PORT}
+
+  imgname="img-$(safename)"
+  run_buildah build $WITH_POLICY_JSON -t "${imgname}1" --platform linux/amd64 -f $contextdir/Dockerfile1
+  run_buildah build $WITH_POLICY_JSON -t "${imgname}2" --platform linux/arm64 -f $contextdir/Dockerfile1
+
+  run_buildah manifest create foo
+  run_buildah manifest add foo "${imgname}1"
+  run_buildah manifest add foo "${imgname}2"
+
+  run_buildah manifest push $WITH_POLICY_JSON --authfile ${TEST_SCRATCH_DIR}/test.auth --all --add-compression zstd --tls-verify=false foo docker://localhost:${REGISTRY_PORT}/list
+
+  run_buildah manifest inspect --authfile ${TEST_SCRATCH_DIR}/test.auth --tls-verify=false localhost:${REGISTRY_PORT}/list
+  list="$output"
+
+  validate_instance_compression "0" "$list" "amd64" "gzip"
+  validate_instance_compression "1" "$list" "arm64" "gzip"
+  validate_instance_compression "2" "$list" "amd64" "zstd"
+  validate_instance_compression "3" "$list" "arm64" "zstd"
+
+  # Pushing again should keep every thing intact if original compression is `gzip` and `--force-compression` is specified
+  run_buildah manifest push $WITH_POLICY_JSON --authfile ${TEST_SCRATCH_DIR}/test.auth --all --add-compression zstd --compression-format gzip --force-compression --tls-verify=false foo docker://localhost:${REGISTRY_PORT}/list
+
+  run_buildah manifest inspect --authfile ${TEST_SCRATCH_DIR}/test.auth --tls-verify=false localhost:${REGISTRY_PORT}/list
+  list="$output"
+
+  validate_instance_compression "0" "$list" "amd64" "gzip"
+  validate_instance_compression "1" "$list" "arm64" "gzip"
+  validate_instance_compression "2" "$list" "amd64" "zstd"
+  validate_instance_compression "3" "$list" "arm64" "zstd"
+
+  # Pushing again without --force-compression but with --compression-format should do the same thing
+  run_buildah manifest push $WITH_POLICY_JSON --authfile ${TEST_SCRATCH_DIR}/test.auth --all --add-compression zstd --compression-format gzip --tls-verify=false foo docker://localhost:${REGISTRY_PORT}/list
+
+  run_buildah manifest inspect --authfile ${TEST_SCRATCH_DIR}/test.auth --tls-verify=false localhost:${REGISTRY_PORT}/list
+  list="$output"
+
+  validate_instance_compression "0" "$list" "amd64" "gzip"
+  validate_instance_compression "1" "$list" "arm64" "gzip"
+  validate_instance_compression "2" "$list" "amd64" "zstd"
+  validate_instance_compression "3" "$list" "arm64" "zstd"
+}
+
+@test "Multi-stage should not remove used base-image without --layers" {
+  run_buildah build -t parent-one -f $BUDFILES/multi-stage-only-base/Containerfile1
+  run_buildah build -t parent-two -f $BUDFILES/multi-stage-only-base/Containerfile2
+  run_buildah build -t multi-stage -f $BUDFILES/multi-stage-only-base/Containerfile3
+  run_buildah images -a
+  expect_output --substring "parent-one" "parent one must not be removed"
+}
+
+@test "no layer should be created on scratch" {
+  imgname="img-$(safename)"
+
+  run_buildah build --layers --label "label1=value1" -t $imgname -f $BUDFILES/from-scratch/Containerfile
+  run_buildah inspect -f '{{len .Docker.RootFS.DiffIDs}}' $imgname
+  expect_output "0" "layer should not exist"
+  run_buildah build --layers -t $imgname -f $BUDFILES/from-scratch/Containerfile
+  run_buildah inspect -f '{{len .Docker.RootFS.DiffIDs}}' $imgname
+  expect_output "0" "layer should not exist"
+}
+
+@test "bud: build push with --force-compression" {
+  skip_if_no_podman
+  blobcachedir=${TEST_SCRATCH_DIR}/blobcachelocal
+  mkdir -p ${blobcachedir}
+  local contextdir=${TEST_SCRATCH_DIR}/bud/platform
+  mkdir -p $contextdir
+
+  # Make sure this is an image never used in any other zstd tests,
+  # nor with any layers used in zstd tests. That could lead to a
+  # different test pushing it zstd, and a "did not expect zstd"
+  # failure below.
+  echo "$(date --utc --iso-8601=seconds) this is a unique layer $(random_string)" >$contextdir/therecanbeonly1
+  cat > $contextdir/Containerfile << _EOF
+FROM scratch
+COPY /therecanbeonly1 /uniquefile
+_EOF
+
+  imgname="img-$(safename)"
+
+  start_registry
+  run_buildah login --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth --username testuser --password testpassword localhost:${REGISTRY_PORT}
+  run_buildah build $WITH_POLICY_JSON -t $imgname --platform linux/amd64 $contextdir
+
+  # Helper function. push our image with the given options, and run skopeo inspect
+  function _test_buildah_push() {
+    run_buildah push \
+                --blob-cache=${blobcachedir} \
+                $WITH_POLICY_JSON \
+                --authfile ${TEST_SCRATCH_DIR}/test.auth \
+                --tls-verify=false \
+                $* \
+                $imgname \
+                docker://localhost:${REGISTRY_PORT}/$imgname
+
+    echo "# skopeo inspect $imgname"
+    run podman run --rm \
+        --mount type=bind,src=${TEST_SCRATCH_DIR}/test.auth,target=/test.auth,Z \
+        --net host \
+        quay.io/skopeo/stable inspect \
+        --authfile=/test.auth \
+        --tls-verify=false \
+        --raw \
+        docker://localhost:${REGISTRY_PORT}/$imgname
+    echo "$output"
+  }
+
+  # layers should have no trace of zstd since push was with --compression-format gzip
+  _test_buildah_push --compression-format gzip
+  assert "$output" !~ "zstd" "zstd found in layers where push was with --compression-format gzip"
+
+  # layers should have no trace of zstd since push is --force-compression=false
+  _test_buildah_push --compression-format zstd --force-compression=false
+  assert "$output" !~ "zstd" "zstd found even though push was without --force-compression"
+
+  # layers should container `zstd`
+  _test_buildah_push --compression-format zstd
+  expect_output --substring "zstd" "layers must contain zstd compression"
+
+  # layers should container `zstd`
+  _test_buildah_push --compression-format zstd --force-compression
+  expect_output --substring "zstd" "layers must contain zstd compression"
 }
 
 @test "bud with --dns* flags" {
@@ -25,8 +218,54 @@ load helpers
   expect_output --substring "options use-vc"
 }
 
-#Verify https://github.com/containers/buildah/issues/4342
+@test "build with inline RUN --network=host" {
+  _prefetch alpine
+  #hostns=$(readlink /proc/self/ns/net)
+  run readlink /proc/self/ns/net
+  hostns="$output"
+  run_buildah build $WITH_POLICY_JSON -t source -f $BUDFILES/inline-network/Dockerfile1
+  expect_output --from="${lines[2]}" "${hostns}"
+}
+
+@test "build with inline RUN --network=none" {
+  _prefetch alpine
+  run_buildah 1 build $WITH_POLICY_JSON -t source -f $BUDFILES/inline-network/Dockerfile2
+  expect_output --substring "wget: bad address"
+}
+
+@test "build with inline RUN --network=fake" {
+  _prefetch alpine
+  run_buildah 125 build $WITH_POLICY_JSON -t source -f $BUDFILES/inline-network/Dockerfile3
+  expect_output --substring "unsupported value"
+}
+
+@test "build with inline default RUN --network=default" {
+  skip_if_chroot
+  _prefetch alpine
+  run readlink /proc/self/ns/net
+  hostns=$output
+  run_buildah build --network=host $WITH_POLICY_JSON -t source -f $BUDFILES/inline-network/Dockerfile4
+  firstns=${lines[2]}
+  assert "${hostns}" == "$firstns"
+  run_buildah build --network=private $WITH_POLICY_JSON -t source -f $BUDFILES/inline-network/Dockerfile4
+  secondns=${lines[2]}
+  assert "$secondns" != "$firstns"
+}
+
+
+@test "bud with ignoresymlink on default file" {
+  _prefetch alpine
+  echo hello > ${TEST_SCRATCH_DIR}/private_file
+  cp -a $BUDFILES/container-ignoresymlink ${TEST_SCRATCH_DIR}/container-ignoresymlink
+  ln -s ${TEST_SCRATCH_DIR}/private_file ${TEST_SCRATCH_DIR}/container-ignoresymlink/.dockerignore
+  run_buildah build $WITH_POLICY_JSON -t test -f Dockerfile $BUDFILES/container-ignoresymlink
+  # Should ignore a .dockerignore or .containerignore that's a symlink to somewhere outside of the build context
+  expect_output --substring "hello"
+}
+
+# Verify https://github.com/containers/buildah/issues/4342
 @test "buildkit-mount type=cache should not hang if cache is wiped in between" {
+  _prefetch alpine
   containerfile=$BUDFILES/cache-mount-locked/Containerfile
   run_buildah build $WITH_POLICY_JSON --build-arg WIPE_CACHE=1 -t source -f $containerfile $BUDFILES/cache-mount-locked
   # build should be success and must contain `hello` from `file` in last step
@@ -35,7 +274,6 @@ load helpers
 
 # Test for https://github.com/containers/buildah/pull/4295
 @test "build test warning for preconfigured TARGETARCH, TARGETOS, TARGETPLATFORM or TARGETVARIANT" {
-  _prefetch alpine
   containerfile=$BUDFILES/platform-sets-args/Containerfile
 
   # Containerfile must contain one or more (four, as of 2022-10) lines
@@ -44,37 +282,48 @@ load helpers
   assert "${checkvars[*]}" != "" \
          "INTERNAL ERROR! No 'ARG xxx' lines in $containerfile!"
 
+  ARCH=$(go env GOARCH)
   # With explicit and full --platform, buildah should not warn.
   run_buildah build $WITH_POLICY_JSON --platform linux/amd64/v2 \
               -t source -f $containerfile
-  assert "$output" !~ "missing .* build argument" \
-         "With explicit --platform, buildah should not warn"
+  assert "$output" =~ "image platform \(linux/amd64\) does not match the expected platform" \
+         "With explicit --platform, buildah should warn about pulling difference in platform"
+  assert "$output" =~ "TARGETOS=linux" " --platform TARGETOS set correctly"
+  assert "$output" =~ "TARGETARCH=amd64" " --platform TARGETARCH set correctly"
+  assert "$output" =~ "TARGETVARIANT=" " --platform TARGETVARIANT set correctly"
+  assert "$output" =~ "TARGETPLATFORM=linux/amd64/v2" " --platform TARGETPLATFORM set correctly"
 
   # Likewise with individual args
   run_buildah build $WITH_POLICY_JSON --os linux --arch amd64 --variant v2 \
               -t source -f $containerfile
-  assert "$output" !~ "missing .* build argument" \
-         "With explicit --os + --arch + --variant, buildah should not warn"
+  assert "$output" =~ "image platform \(linux/amd64\) does not match the expected platform" \
+         "With explicit --variant, buildah should warn about pulling difference in platform"
+  assert "$output" =~ "TARGETOS=linux" "--os --arch --variant TARGETOS set correctly"
+  assert "$output" =~ "TARGETARCH=amd64" "--os --arch --variant TARGETARCH set correctly"
+  assert "$output" =~ "TARGETVARIANT=" "--os --arch --variant TARGETVARIANT set correctly"
+  assert "$output" =~ "TARGETPLATFORM=linux/amd64" "--os --arch --variant TARGETPLATFORM set correctly"
 
-  # FIXME FIXME FIXME: #4319: with --os only, buildah should not warn about OS
-  if false; then
-      run_buildah build $WITH_POLICY_JSON --os linux \
-                  -t source -f $containerfile
-      assert "$output" !~ "missing.*TARGETOS" \
-             "With explicit --os (but no arch/variant), buildah should not warn about TARGETOS"
-      # FIXME: add --arch test too, and maybe make this cleaner
-  fi
+  run_buildah build $WITH_POLICY_JSON --os linux -t source -f $containerfile
+  assert "$output" !~ "WARNING" \
+         "With explicit --os (but no arch/variant), buildah should not warn about TARGETOS"
+  assert "$output" =~ "TARGETOS=linux" "--os TARGETOS set correctly"
+  assert "$output" =~ "TARGETARCH=${ARCH}" "--os TARGETARCH set correctly"
+  assert "$output" =~ "TARGETVARIANT=" "--os TARGETVARIANT set correctly"
+  assert "$output" =~ "TARGETPLATFORM=linux/${ARCH}" "--os TARGETPLATFORM set correctly"
 
-  # Without --platform nor other args, we want one warning for each variable
-  run_buildah build $WITH_POLICY_JSON -t source -f $containerfile
-  local i=0
-  for var in "${checkvars[@]}"; do
-    # The '..'s cover backslash-quote: "missing \"TARGETFOO\" ..."
-    assert "${lines[$i]}" =~ "missing ..${var}.. build argument" \
-           "line $i: buildah should warn about undefined ${var}"
-    i=$((i+1))
+  run_buildah build $WITH_POLICY_JSON --arch amd64 -t source -f $containerfile
+  assert "$output" !~ "WARNING" \
+         "With explicit --os (but no arch/variant), buildah should not warn about TARGETOS"
+  assert "$output" =~ "TARGETOS=linux" "--arch TARGETOS set correctly"
+  assert "$output" =~ "TARGETARCH=amd64" "--arch TARGETARCH set correctly"
+  assert "$output" =~ "TARGETVARIANT=" "--arch TARGETVARIANT set correctly"
+  assert "$output" =~ "TARGETPLATFORM=linux/amd64" "--arch TARGETPLATFORM set correctly"
+
+  for option in "--arch=arm64" "--os=windows" "--variant=v2"; do
+    run_buildah 125 build $WITH_POLICY_JSON --platform linux/amd64 ${option} \
+                -t source -f $containerfile
+    assert "$output" =~ "invalid --platform may not be used with --os, --arch, or --variant" "can't use --platform and one of --os, --arch or --variant together"
   done
-  assert "$i" -ne 0 "INTERNAL ERROR: did not check for any warnings!"
 }
 
 @test "build-conflicting-isolation-chroot-and-network" {
@@ -106,6 +355,245 @@ _EOF
   run_buildah 1 run myctr ls -l sub2.txt
 
   run_buildah 1 run myctr ls -l subdir/
+}
+
+@test "bud --layers with --mount type bind should burst cache if symlink is changed" {
+  _prefetch alpine
+  local contextdir=${TEST_SCRATCH_DIR}/bud/platform
+  mkdir -p $contextdir
+
+  cat > $contextdir/samplefile1 << _EOF
+First symlink content
+_EOF
+
+  cat > $contextdir/samplefile2 << _EOF
+Second symlink content
+_EOF
+
+  # Create symlink to samplefile1 and we will mount that
+  ln -s samplefile1 $contextdir/tomount
+  pwd
+  ls $contextdir/
+  cat $contextdir/tomount
+
+  cat > $contextdir/Containerfile << _EOF
+FROM alpine
+RUN --mount=type=bind,source=tomount,target=file,Z cat file
+_EOF
+
+  # on first run since there is no cache so `samplefile1` must be printed
+  run_buildah build $WITH_POLICY_JSON --layers -t source -f $contextdir/Containerfile $contextdir
+  expect_output --substring "First symlink content"
+
+  run_buildah build $WITH_POLICY_JSON --layers -t source -f $contextdir/Containerfile $contextdir
+  # output should not contain content from the file since entire build is cached
+  assert "$output" !~ "First symlink content"
+
+  # Modify the symlink
+  ln -sf samplefile2 $contextdir/tomount 
+
+  # on third run since we have changed symlink so cache must burst.
+  run_buildah build $WITH_POLICY_JSON --layers -t source -f $contextdir/Containerfile $contextdir
+  expect_output --substring "Second symlink content"
+}
+
+@test "bud --layers with --mount type bind should burst cache if content is changed" {
+  _prefetch alpine
+  local contextdir=${TEST_SCRATCH_DIR}/bud/platform
+  mkdir -p $contextdir
+
+  cat > $contextdir/samplefile << _EOF
+samplefile
+_EOF
+
+  cat > $contextdir/Containerfile << _EOF
+FROM alpine
+RUN --mount=type=bind,target=/test,Z ls /test
+_EOF
+
+  # on first run since there is no cache so `samplefile` must be printed
+  run_buildah build $WITH_POLICY_JSON --layers -t source -f $contextdir/Containerfile $contextdir
+  expect_output --substring "samplefile"
+
+  # on second run since there is cache so `samplefile` should not be printed
+  run_buildah build $WITH_POLICY_JSON --layers -t source -f $contextdir/Containerfile $contextdir
+  # output should not contain `samplefile`
+  assert "$output" !~ "samplefile"
+
+  cat > $contextdir/anotherfile << _EOF
+anotherfile
+_EOF
+
+  # on third run since we have added new file `anotherfile` so cache must burst.
+  run_buildah build $WITH_POLICY_JSON --layers -t source -f $contextdir/Containerfile $contextdir
+  expect_output --substring "samplefile"
+  expect_output --substring "anotherfile"
+}
+
+@test "bud --layers with --mount type bind should burst and multiple mounts cache if content is changed" {
+  _prefetch alpine
+  local contextdir=${TEST_SCRATCH_DIR}/bud/platform
+  mkdir -p $contextdir
+
+  cat > $contextdir/samplefile << _EOF
+samplefile
+_EOF
+
+  cat > $contextdir/testfile << _EOF
+Helloworld
+_EOF
+
+  cat > $contextdir/Containerfile << _EOF
+FROM alpine
+RUN --mount=type=bind,target=/test,Z --mount=type=bind,source=testfile,target=testfile,Z ls /test && cat testfile
+_EOF
+
+  # on first run since there is no cache so `samplefile` must be printed
+  run_buildah build $WITH_POLICY_JSON --layers -t source -f $contextdir/Containerfile $contextdir
+  expect_output --substring "samplefile"
+  expect_output --substring "Helloworld"
+
+  # on second run since there is cache so `samplefile` should not be printed
+  run_buildah build $WITH_POLICY_JSON --layers -t source -f $contextdir/Containerfile $contextdir
+  # output should not contain `samplefile`
+  assert "$output" !~ "samplefile"
+
+  # Modify sample file 2
+  cat > $contextdir/testfile << _EOF
+Helloworld2
+_EOF
+
+  # on third run since we have modified `testfile` so cache must burst.
+  run_buildah build $WITH_POLICY_JSON --layers -t source -f $contextdir/Containerfile $contextdir
+  expect_output --substring "samplefile"
+  expect_output --substring "Helloworld2"
+}
+
+@test "bud --layers with --mount type bind should burst cache if content is changed - source is additional build context" {
+  _prefetch alpine
+  local contextdir=${TEST_SCRATCH_DIR}/bud/platform
+  mkdir -p $contextdir
+
+  cat > $contextdir/samplefile << _EOF
+samplefile2
+_EOF
+
+  cat > $contextdir/Containerfile << _EOF
+FROM alpine
+RUN --mount=type=bind,from=one,target=/test,Z ls /test
+_EOF
+
+  # on first run since there is no cache so `samplefile` must be printed
+  run_buildah build $WITH_POLICY_JSON --build-context one=$contextdir --layers -t source -f $contextdir/Containerfile
+  expect_output --substring "samplefile"
+
+  # on second run since there is cache so `samplefile` should not be printed
+  run_buildah build $WITH_POLICY_JSON --build-context one=$contextdir --layers -t source -f $contextdir/Containerfile
+  # output should not `samplefile` since cache is being used
+  assert "$output" !~ "samplefile"
+
+  cat > $contextdir/anotherfile << _EOF
+anotherfile2
+_EOF
+
+  # on third run since we have added new file `anotherfile` so cache must burst.
+  run_buildah build $WITH_POLICY_JSON --build-context one=$contextdir --layers -t source -f $contextdir/Containerfile
+  expect_output --substring "samplefile"
+  expect_output --substring "anotherfile"
+}
+
+@test "bud --layers should not hit cache if heredoc is changed" {
+  _prefetch alpine
+  local contextdir=${TEST_SCRATCH_DIR}/bud/platform
+  mkdir -p $contextdir
+
+  cat > $contextdir/Dockerfile << _EOF
+FROM alpine
+RUN <<EOF
+echo "Cache burst" >> /hello
+echo "Cache burst second line" >> /hello
+EOF
+RUN cat hello
+_EOF
+
+  # on first run since there is no cache so `Cache burst` must be printed
+  run_buildah build $WITH_POLICY_JSON --layers -t source -f $contextdir/Dockerfile
+  expect_output --substring "Cache burst second line"
+
+  # on second run since there is cache so `Cache burst` should not be printed
+  run_buildah build $WITH_POLICY_JSON --layers -t source -f $contextdir/Dockerfile
+  # output should not contain cache burst
+  assert "$output" !~ "Cache burst second line"
+
+  cat > $contextdir/Dockerfile << _EOF
+FROM alpine
+RUN <<EOF
+echo "Cache burst add diff" >> /hello
+EOF
+RUN cat hello
+_EOF
+
+  # on third run since we have changed heredoc so `Cache burst` must be printed.
+  run_buildah build $WITH_POLICY_JSON --layers -t source -f $contextdir/Dockerfile
+  expect_output --substring "Cache burst add diff"
+}
+
+@test "bud build with heredoc content" {
+  _prefetch quay.io/fedora/python-311
+  run_buildah build -t heredoc $WITH_POLICY_JSON -f $BUDFILES/heredoc/Containerfile .
+  expect_output --substring "print first line from heredoc"
+  expect_output --substring "print second line from heredoc"
+  expect_output --substring "Heredoc writing first file"
+  expect_output --substring "some text of first file"
+  expect_output --substring "file2 from python"
+  expect_output --substring "(your index page goes here)"
+  expect_output --substring "(robots content)"
+  expect_output --substring "(humans content)"
+  expect_output --substring "this is the output of test6 part1"
+  expect_output --substring "this is the output of test6 part2"
+  expect_output --substring "this is the output of test7 part1"
+  expect_output --substring "this is the output of test7 part2"
+  expect_output --substring "this is the output of test7 part3"
+  expect_output --substring "this is the output of test8 part1"
+  expect_output --substring "this is the output of test8 part2"
+
+  # verify that build output contains summary of heredoc content
+  expect_output --substring 'RUN <<EOF \(echo "print first line from heredoc"...)'
+  expect_output --substring 'RUN <<EOF \(echo "Heredoc writing first file" >> /file1...)'
+  expect_output --substring 'RUN python3 <<EOF \(with open\("/file2", "w") as f:...)'
+  expect_output --substring 'ADD <<EOF /index.html \(\(your index page goes here))'
+  expect_output --substring 'COPY <<robots.txt <<humans.txt /test/ \(\(robots content)) \(\(humans content))'
+}
+
+@test "bud build with heredoc with COPY instructionw with .containerignore set" {
+  run_buildah build -t heredoc $WITH_POLICY_JSON -f $BUDFILES/heredoc-ignore/Containerfile --ignorefile $BUDFILES/heredoc-ignore/.containerignore .
+  expect_output --substring "This is a file"
+  expect_output --substring "This is a line from file"
+}
+
+@test "bud build with heredoc content which is a bash file" {
+  skip_if_in_container
+  _prefetch busybox
+  run_buildah build -t heredoc $WITH_POLICY_JSON -f $BUDFILES/heredoc/Containerfile.bash_file .
+  expect_output --substring "this is the output of test9"
+  expect_output --substring "this is the output of test10"
+}
+
+@test "bud build with heredoc content with inline interpreter" {
+  skip_if_in_container
+  _prefetch busybox
+  run_buildah build -t heredoc $WITH_POLICY_JSON -f $BUDFILES/heredoc/Containerfile.she_bang .
+  expect_output --substring "#
+this is the output of test11
+this is the output of test12"
+}
+
+@test "bud build with heredoc verify mount leak" {
+  skip_if_in_container
+  _prefetch alpine
+  run_buildah 1 build -t heredoc $WITH_POLICY_JSON -f $BUDFILES/heredoc/Containerfile.verify_mount_leak .
+  expect_output --substring "this is the output of test"
+  expect_output --substring "ls: /dev/pipes: No such file or directory"
 }
 
 @test "bud with .containerignore" {
@@ -182,12 +670,14 @@ symlink(subdir)"
 }
 
 @test "bud with .dockerignore #2" {
+  _prefetch busybox
   run_buildah 125 build -t testbud3 $WITH_POLICY_JSON $BUDFILES/dockerignore3
   expect_output --substring 'building.*"COPY test1.txt /upload/test1.txt".*no such file or directory'
   expect_output --substring $(realpath "$BUDFILES/dockerignore3/.dockerignore")
 }
 
 @test "bud with .dockerignore #4" {
+  _prefetch busybox
   run_buildah 125 build -t testbud3 $WITH_POLICY_JSON -f Dockerfile.test $BUDFILES/dockerignore4
   expect_output --substring 'building.*"COPY test1.txt /upload/test1.txt".*no such file or directory'
   expect_output --substring '1 filtered out using /[^ ]*/Dockerfile.test.dockerignore'
@@ -213,26 +703,74 @@ symlink(subdir)"
   run_buildah 1 run myctr ls -l subdir/
 }
 
-@test "build with basename resolving default arg" {
+@test "build with --platform without OS" {
   run_buildah info --format '{{.host.arch}}'
   myarch="$output"
-  run_buildah info --format '{{.host.variant}}'
-  myvariant="$output"
 
-  run_buildah build --platform linux/$myarch/$myvariant $WITH_POLICY_JSON -t test -f $BUDFILES/base-with-arg/Containerfile
+  run_buildah build --platform $myarch $WITH_POLICY_JSON -t test -f $BUDFILES/base-with-arg/Containerfile
+  expect_output --substring "This is built for $myarch"
+
+  ## podman-remote binding has a bug where is sends `--platform as /`
+  run_buildah build --platform "/" $WITH_POLICY_JSON -t test -f $BUDFILES/base-with-arg/Containerfile
+  expect_output --substring "This is built for $myarch"
+}
+
+@test "build with basename resolving default arg" {
+  run_buildah info --format '{{.host.os}}/{{.host.arch}}{{if .host.variant}}/{{.host.variant}}{{end}}'
+  myplatform="$output"
+  run_buildah info --format '{{.host.arch}}'
+  myarch="$output"
+
+  run_buildah build --platform ${myplatform} $WITH_POLICY_JSON -t test -f $BUDFILES/base-with-arg/Containerfile
+  expect_output --substring "This is built for $myarch"
+
+  run_buildah build                          $WITH_POLICY_JSON -t test -f $BUDFILES/base-with-arg/Containerfile
   expect_output --substring "This is built for $myarch"
 }
 
 @test "build with basename resolving user arg" {
+  _prefetch alpine
   run_buildah build --build-arg CUSTOM_TARGET=first $WITH_POLICY_JSON -t test -f $BUDFILES/base-with-arg/Containerfile2
   expect_output --substring "This is built for first"
   run_buildah build --build-arg CUSTOM_TARGET=second $WITH_POLICY_JSON -t test -f $BUDFILES/base-with-arg/Containerfile2
   expect_output --substring "This is built for second"
 }
 
+@test "build with basename resolving user arg from file" {
+  _prefetch alpine
+  run_buildah build \
+	--build-arg-file $BUDFILES/base-with-arg/first.args \
+	$WITH_POLICY_JSON -t test -f $BUDFILES/base-with-arg/Containerfile2
+  expect_output --substring "This is built for first"
+
+  run_buildah build \
+	--build-arg-file $BUDFILES/base-with-arg/second.args \
+	$WITH_POLICY_JSON -t test -f $BUDFILES/base-with-arg/Containerfile2
+  expect_output --substring "This is built for second"
+}
+
+@test "build with basename resolving user arg from latest file in arg list" {
+  _prefetch alpine
+  run_buildah build \
+	--build-arg-file $BUDFILES/base-with-arg/second.args \
+	--build-arg-file $BUDFILES/base-with-arg/first.args \
+	$WITH_POLICY_JSON -t test -f $BUDFILES/base-with-arg/Containerfile2
+  expect_output --substring "This is built for first"
+}
+
+@test "build with basename resolving user arg from in arg list" {
+  _prefetch alpine
+  run_buildah build \
+	--build-arg-file $BUDFILES/base-with-arg/second.args \
+	--build-arg CUSTOM_TARGET=first \
+	$WITH_POLICY_JSON -t test -f $BUDFILES/base-with-arg/Containerfile2
+  expect_output --substring "This is built for first"
+}
+
 # Following test should fail since we are trying to use build-arg which
 # was not declared. Honors discussion here: https://github.com/containers/buildah/pull/4061/commits/1237c04d6ae0ee1f027a1f02bf3ab5c57ac7d9b6#r906188374
 @test "build with basename resolving user arg - should fail" {
+  _prefetch alpine
   run_buildah 125 build --build-arg CUSTOM_TARGET=first $WITH_POLICY_JSON -t test -f $BUDFILES/base-with-arg/Containerfilebad
   expect_output --substring "invalid reference format"
 }
@@ -343,6 +881,7 @@ _EOF
 
 # Test build with --add-history=false
 @test "build-with-omit-history-to-true should not add history" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -364,6 +903,7 @@ _EOF
 
 # Test building with --userns=auto
 @test "build with --userns=auto also with size" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
   user=$USER
@@ -395,6 +935,7 @@ _EOF
 
 # Test building with --userns=auto with uidmapping
 @test "build with --userns=auto with uidmapping" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
   user=$USER
@@ -420,6 +961,7 @@ _EOF
 
 # Test building with --userns=auto with gidmapping
 @test "build with --userns=auto with gidmapping" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
   user=$USER
@@ -446,6 +988,7 @@ _EOF
 # Test bud with prestart hook
 @test "build-test with OCI prestart hook" {
   skip_if_in_container # This works in privileged container setup but does not works in CI setup
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir/hooks
 
@@ -480,6 +1023,7 @@ _EOF
 }
 
 @test "build with add resolving to invalid HTTP status code" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -499,8 +1043,40 @@ _EOF
   expect_output --substring "Groups:	1000"
 }
 
+@test "build-mount-cache-with-id-mappings" {
+  _prefetch alpine
+  local contextdir=${TEST_SCRATCH_DIR}/context
+  mkdir ${contextdir}
+
+  # with no ID mappings
+  local cacheid=${SRANDOM}
+  cat > ${contextdir}/Dockerfile << EOF
+  FROM alpine
+  USER 1000:1000
+  RUN --mount=type=cache,id=${cacheid},target=/var/tmp,uid=1000,gid=1000 stat / /var/tmp
+  RUN --mount=type=cache,id=${cacheid},target=/var/tmp,uid=1000,gid=1000 test \`stat -c %u /var/tmp\` -eq 1000
+  RUN --mount=type=cache,id=${cacheid},target=/var/tmp,uid=1000,gid=1000 touch /var/tmp/should-be-able-to-write
+EOF
+  run_buildah build $WITH_POLICY_JSON ${contextdir}
+
+  # with non-default ID mappings
+  local cacheid=${SRANDOM}
+  cat > ${contextdir}/Dockerfile << EOF
+  FROM alpine
+  USER 1000:1000
+  RUN --mount=type=cache,id=${cacheid},target=/var/tmp,uid=1000,gid=1000 stat / /var/tmp
+  RUN --mount=type=cache,id=${cacheid},target=/var/tmp,uid=1000,gid=1000 test \`stat -c %u /var/tmp\` -eq 1000
+  RUN --mount=type=cache,id=${cacheid},target=/var/tmp,uid=1000,gid=1000 touch /var/tmp/should-be-able-to-write
+EOF
+  if test `id -u` -eq 0 ; then
+    run_buildah build --userns-uid-map 0:1:1023 --userns-gid-map 0:1:1023 $WITH_POLICY_JSON ${contextdir}
+  else
+    run_buildah build --userns auto:size=1023 $WITH_POLICY_JSON ${contextdir}
+  fi
+}
+
 @test "build test if supplemental groups has gid with --isolation chroot" {
-  test -z "${BUILDAH_ISOLATION}" || skip "BUILDAH_ISOLATION=${BUILDAH_ISOLATION} overrides --isolation"
+  test "${BUILDAH_ISOLATION}" != chroot || skip "BUILDAH_ISOLATION=${BUILDAH_ISOLATION} overrides --isolation"
 
   _prefetch alpine
   run_buildah build --isolation chroot $WITH_POLICY_JSON -t source -f $BUDFILES/supplemental-groups/Dockerfile
@@ -508,7 +1084,146 @@ _EOF
   expect_output --substring "Groups:	1000"
 }
 
+@test "build-test --mount=type=secret test relative to workdir mount" {
+  _prefetch alpine
+  local contextdir=$BUDFILES/secret-relative
+  run_buildah build $WITH_POLICY_JSON --no-cache --secret id=secret-foo,src=$contextdir/secret1.txt --secret id=secret-bar,src=$contextdir/secret2.txt -t test -f $contextdir/Dockerfile
+  expect_output --substring "secret:foo"
+  expect_output --substring "secret:bar"
+}
+
+@test "build-test --mount=type=cache test relative to workdir mount" {
+  _prefetch alpine
+  local contextdir=${TEST_SCRATCH_DIR}/bud/platform
+  mkdir -p $contextdir
+  ## write-cache
+  cat > $contextdir/Dockerfile << _EOF
+FROM alpine
+RUN mkdir test
+WORKDIR test
+RUN --mount=type=cache,id=YfHI60aApFM-target,target=target echo world > /test/target/hello
+_EOF
+
+  run_buildah build $WITH_POLICY_JSON -t source -f $contextdir/Dockerfile
+
+  cat > $contextdir/Dockerfile << _EOF
+FROM alpine
+RUN mkdir test
+WORKDIR test
+RUN --mount=type=cache,id=YfHI60aApFM-target,target=target cat /test/target/hello
+_EOF
+
+  run_buildah build $WITH_POLICY_JSON -t source -f $contextdir/Dockerfile
+  expect_output --substring "world"
+}
+
+@test "build-test do not use mount stage from cache if it was rebuilt" {
+  _prefetch alpine
+  local contextdir=${TEST_SCRATCH_DIR}/bud/platform
+  mkdir -p $contextdir
+
+  cat > $contextdir/Dockerfile << _EOF
+FROM alpine as dependencies
+
+RUN mkdir /build && echo v1 > /build/version
+
+FROM alpine
+
+RUN --mount=type=bind,source=/build,target=/build,from=dependencies \
+    cp /build/version /version
+
+RUN cat /version
+_EOF
+
+  run_buildah build $WITH_POLICY_JSON --layers -t source -f $contextdir/Dockerfile
+  run_buildah build $WITH_POLICY_JSON --layers -t source2 -f $contextdir/Dockerfile
+  expect_output --substring "Using cache"
+
+  # First stage i.e dependencies is changed so it should not use the steps in second stage from
+  # cache
+  cat > $contextdir/Dockerfile << _EOF
+FROM alpine as dependencies
+
+RUN mkdir /build && echo v2 > /build/version
+
+FROM alpine
+
+RUN --mount=type=bind,source=/build,target=/build,from=dependencies \
+    cp /build/version /version
+
+RUN cat /version
+_EOF
+
+  run_buildah build $WITH_POLICY_JSON --layers -t source3 -f $contextdir/Dockerfile
+  assert "$output" !~ "Using cache"
+
+}
+
+@test "build-test use image from cache with --mount and burst when image is changed" {
+  _prefetch alpine
+  local contextdir=${TEST_SCRATCH_DIR}/bud/platform
+  mkdir -p $contextdir
+
+  cat > $contextdir/Containerfile << _EOF
+FROM alpine
+RUN touch firstfile
+_EOF
+
+  run_buildah build $WITH_POLICY_JSON --layers -t source -f $contextdir/Containerfile
+
+  cat > $contextdir/Containerfile2 << _EOF
+FROM alpine
+
+RUN --mount=type=bind,source=.,target=/build,from=source ls /build
+
+_EOF
+
+  run_buildah build $WITH_POLICY_JSON --layers -t source2 -f $contextdir/Containerfile2
+  expect_output --substring "firstfile"
+
+  # Building again must use cache
+  run_buildah build $WITH_POLICY_JSON --layers -t source2 -f $contextdir/Containerfile2
+  expect_output --substring "Using cache"
+  assert "$output" !~ "firstfile"
+}
+
+# Verify: https://github.com/containers/buildah/issues/4572
+@test "build-test verify no dangling containers are left" {
+  _prefetch alpine busybox
+  local contextdir=${TEST_SCRATCH_DIR}/bud/platform
+  mkdir -p $contextdir
+
+  cat > $contextdir/Dockerfile << _EOF
+FROM alpine AS alpine_builder
+FROM busybox AS busybox_builder
+FROM scratch
+COPY --from=alpine_builder /etc/alpine* .
+COPY --from=busybox_builder /bin/busybox /bin/busybox
+_EOF
+
+  run_buildah build $WITH_POLICY_JSON -t source -f $contextdir/Dockerfile
+  # No leftover containers, just the header line.
+  run_buildah containers
+  expect_line_count 1
+}
+
+# Verify: https://github.com/containers/buildah/issues/4485
+# Verify: https://github.com/containers/buildah/issues/4319
+@test "No default warning for TARGETARCH, TARGETOS, TARGETPLATFORM " {
+  local contextdir=$BUDFILES/targetarch
+
+  run_buildah build $WITH_POLICY_JSON --platform=linux/amd64,linux/arm64 -f $contextdir/Dockerfile
+  assert "$output" !~ "one or more build args were not consumed" \
+	 "No warning for default args should be there"
+
+  run_buildah build $WITH_POLICY_JSON --os linux -f $contextdir/Dockerfile
+  assert "$output" !~ "Try adding" \
+	"No Warning for default args should be there"
+}
+
+
 @test "build-test skipping unwanted stages with --skip-unused-stages=false and --skip-unused-stages=true" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -542,6 +1257,7 @@ _EOF
 }
 
 @test "build-test: do not warn for instructions declared in unused stages" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -560,7 +1276,7 @@ FROM one
 RUN echo "target stage"
 _EOF
 
-  # with --skip-unused-stages=true no warning should be printed since ARG is decalred in stage which is not used
+  # with --skip-unused-stages=true no warning should be printed since ARG is declared in stage which is not used
   run_buildah build $WITH_POLICY_JSON --skip-unused-stages=true -t source -f $contextdir/Dockerfile
   expect_output --substring "needed stage"
   expect_output --substring "target stage"
@@ -578,6 +1294,7 @@ _EOF
 
 # Test skipping images with FROM
 @test "build-test skipping unwanted stages with FROM" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -615,14 +1332,13 @@ _EOF
   wait
   # Number of output bytes must be always same, which confirms that there is no race.
   assert "$(cat ${TEST_SCRATCH_DIR}/id.* | wc -c)" = 1775 "Total chars in all id.* files"
-  # clean all images built for this test
-  run_buildah rmi --all -f
 }
 
 # Test skipping images with FROM but stage name also conflicts with additional build context
 # so selected stage should be still skipped since it is not being actually used by additional build
 # context is being used.
 @test "build-test skipping unwanted stages with FROM and conflict with additional build context" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
   # add file on original context
@@ -651,6 +1367,7 @@ _EOF
 
 # Test skipping unwanted stage with COPY from stage name
 @test "build-test skipping unwanted stages with COPY from stage name" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -677,6 +1394,7 @@ _EOF
 }
 
 @test "build test --retry and --retry-delay" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -692,6 +1410,7 @@ _EOF
 
 # Test skipping unwanted stage with COPY from stage index
 @test "build-test skipping unwanted stages with COPY from stage index" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -722,6 +1441,7 @@ _EOF
 
 # Test if our cache is working in optimal way for COPY use case
 @test "build test optimal cache working for COPY instruction" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -739,6 +1459,7 @@ _EOF
 
 # Test if our cache is working in optimal way for ADD use case
 @test "build test optimal cache working for ADD instruction" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -756,6 +1477,7 @@ _EOF
 
 # Test skipping unwanted stage with --mount from another stage
 @test "build-test skipping unwanted stages with --mount from stagename" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -785,6 +1507,7 @@ _EOF
 
 # Test skipping unwanted stage with --mount from another stage
 @test "build-test skipping unwanted stages with --mount from stagename with flag order changed" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -814,6 +1537,7 @@ _EOF
 
 # Test pinning image using additional build context
 @test "build-with-additional-build-context and COPY, test pinning image" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -839,6 +1563,7 @@ _EOF
 # Test conflict between stage short name and additional-context conflict
 # Buildkit parity give priority to additional-context over stage names.
 @test "build-with-additional-build-context and COPY, stagename and additional-context conflict" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -867,6 +1592,7 @@ _EOF
 # When numeric index of stage is used and stage exists but additional context also exist with name
 # same as stage in such situations always use additional context.
 @test "build-with-additional-build-context and COPY, additionalContext and numeric value of stage" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -896,6 +1622,7 @@ _EOF
 # Test conflict between stage short name and additional-context conflict on FROM
 # Buildkit parity give priority to additional-context over stage names.
 @test "build-with-additional-build-context and FROM, stagename and additional-context conflict" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -923,6 +1650,7 @@ _EOF
 
 # Test adding additional build context
 @test "build-with-additional-build-context and COPY, additional context from host" {
+  _prefetch alpine
   local contextdir1=${TEST_SCRATCH_DIR}/bud/platform
   local contextdir2=${TEST_SCRATCH_DIR}/bud/platform2
   mkdir -p $contextdir1 $contextdir2
@@ -948,6 +1676,7 @@ _EOF
 
 # Test adding additional build context but download tar
 @test "build-with-additional-build-context and COPY, additional context from external URL" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -965,6 +1694,7 @@ _EOF
 
 # Test pinning image
 @test "build-with-additional-build-context and FROM, pin busybox to alpine" {
+  _prefetch busybox
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -982,6 +1712,7 @@ _EOF
 
 # Test usage of RUN --mount=from=<name> with additional context and also test conflict with stage-name
 @test "build-with-additional-build-context and RUN --mount=from=, additional-context and also test conflict with stagename" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -1009,6 +1740,7 @@ _EOF
 
 # Test usage of RUN --mount=from=<name> with additional context and also test conflict with stage-name, when additionalContext is on host
 @test "build-with-additional-build-context and RUN --mount=from=, additional-context not image and also test conflict with stagename" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
   echo world > $contextdir/hello
@@ -1027,8 +1759,33 @@ _EOF
   expect_output --substring "world"
 }
 
+@test "build-with-additional-build-context must use cache if built with layers" {
+  _prefetch alpine
+  local contextdir=${TEST_SCRATCH_DIR}/bud/platform
+  mkdir -p $contextdir
+  echo world > $contextdir/hello
+
+  cat > $contextdir/Containerfile2 << _EOF
+FROM alpine as some-stage
+RUN echo some_text
+
+# hello should get copied since we are giving priority to additional context
+FROM alpine
+RUN --mount=type=bind,from=some-stage,target=/test,z cat /test/hello
+_EOF
+
+  # Additional context for RUN --mount is file on host
+  run_buildah build $WITH_POLICY_JSON --layers --build-context some-stage=$contextdir -t test -f $contextdir/Containerfile2
+  expect_output --substring "world"
+
+  run_buildah build $WITH_POLICY_JSON --layers --build-context some-stage=$contextdir -t test -f $contextdir/Containerfile2
+  expect_output --substring "Using cache"
+  assert "$output" !~ "world"
+}
+
 # Test usage of RUN --mount=from=<name> with additional context is URL and mount source is relative using src
 @test "build-with-additional-build-context and RUN --mount=from=, additional-context is URL and mounted from subdir" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
 
@@ -1046,7 +1803,32 @@ _EOF
   expect_output --substring "crun.c"
 }
 
+@test "build-with-additional-build-context and COPY, ensure .containerignore is being respected" {
+  _prefetch alpine
+  local additionalcontextdir=${TEST_SCRATCH_DIR}/bud/platform
+  mkdir -p $additionalcontextdir
+  touch $additionalcontextdir/hello
+  cat > $additionalcontextdir/.containerignore << _EOF
+hello
+_EOF
+
+  cat > $additionalcontextdir/Containerfile << _EOF
+FROM alpine
+RUN echo world
+
+# hello should not be available since
+# it's excluded as per the additional
+# build context's .containerignore file
+COPY --from=project hello .
+RUN cat hello
+_EOF
+
+  run_buildah 125 build $WITH_POLICY_JSON --build-context project=$additionalcontextdir -t test -f $additionalcontextdir/Containerfile
+  expect_output --substring "COPY --from=project hello .\": no items matching glob"
+}
+
 @test "bud with --layers and --no-cache flags" {
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/use-layers
   cp -a $BUDFILES/use-layers $contextdir
 
@@ -1091,6 +1873,15 @@ _EOF
   run_buildah build $WITH_POLICY_JSON --no-cache -t test7 -f Dockerfile.2 $contextdir
   run_buildah images -a
   expect_line_count 18
+}
+
+@test "bud with no --layers comment" {
+  _prefetch alpine
+  run_buildah build --pull-never $WITH_POLICY_JSON --layers=false --no-cache -t test $BUDFILES/use-layers
+  run_buildah images -a
+  expect_line_count 3
+  run_buildah inspect --format "{{index .Docker.History 2}}" test
+  expect_output --substring "FROM docker.io/library/alpine:latest"
 }
 
 @test "bud with --layers and single and two line Dockerfiles" {
@@ -1197,9 +1988,10 @@ _EOF
   fromDigest="$output"
 
   target=foo
+
+  # Check the base-image annotations in a single-layer build where the last stage is just an earlier stage.
   run_buildah build $WITH_POLICY_JSON -t ${target} -f $BUDFILES/multi-stage-builds/Dockerfile.reused $BUDFILES/multi-stage-builds
 
-  # Also check for base-image annotations.
   run_buildah inspect --format '{{index .ImageAnnotations "org.opencontainers.image.base.digest" }}' ${target}
   expect_output "$fromDigest" "base digest from busybox"
   run_buildah inspect --format '{{index .ImageAnnotations "org.opencontainers.image.base.name" }}' ${target}
@@ -1207,8 +1999,39 @@ _EOF
 
   run_buildah from $WITH_POLICY_JSON ${target}
   run_buildah rmi -f ${target}
+
+  # Check the base-image annotations in a multi-layer build where the last stage is just an earlier stage.
   run_buildah build $WITH_POLICY_JSON -t ${target} --layers -f $BUDFILES/multi-stage-builds/Dockerfile.reused $BUDFILES/multi-stage-builds
+
+  run_buildah inspect --format '{{index .ImageAnnotations "org.opencontainers.image.base.digest" }}' ${target}
+  expect_output "$fromDigest" "base digest from busybox"
+  run_buildah inspect --format '{{index .ImageAnnotations "org.opencontainers.image.base.name" }}' ${target}
+  expect_output "docker.io/library/busybox:latest" "base name from busybox"
+
   run_buildah from $WITH_POLICY_JSON ${target}
+  run_buildah rmi -f ${target}
+
+  # Check the base-image annotations in a single-layer build where the last stage is based on an earlier stage.
+  run_buildah build $WITH_POLICY_JSON -t ${target} -f $BUDFILES/multi-stage-builds/Dockerfile.reused2 $BUDFILES/multi-stage-builds
+
+  run_buildah inspect --format '{{index .ImageAnnotations "org.opencontainers.image.base.digest" }}' ${target}
+  expect_output "$fromDigest" "base digest from busybox"
+  run_buildah inspect --format '{{index .ImageAnnotations "org.opencontainers.image.base.name" }}' ${target}
+  expect_output "docker.io/library/busybox:latest" "base name from busybox"
+
+  run_buildah from $WITH_POLICY_JSON ${target}
+  run_buildah rmi -f ${target}
+
+  # Check the base-image annotations in a multi-layer build where the last stage is based on an earlier stage.
+  run_buildah build $WITH_POLICY_JSON -t ${target} --layers -f $BUDFILES/multi-stage-builds/Dockerfile.reused2 $BUDFILES/multi-stage-builds
+
+  run_buildah inspect --format '{{index .ImageAnnotations "org.opencontainers.image.base.digest" }}' ${target}
+  expect_output "$fromDigest" "base digest from busybox"
+  run_buildah inspect --format '{{index .ImageAnnotations "org.opencontainers.image.base.name" }}' ${target}
+  expect_output "docker.io/library/busybox:latest" "base name from busybox"
+
+  run_buildah from $WITH_POLICY_JSON ${target}
+  run_buildah rmi -f ${target}
 }
 
 @test "bud-multistage-cache" {
@@ -1312,10 +2135,10 @@ _EOF
   run_buildah build $WITH_POLICY_JSON --build-arg=FOO=12 --layers -t args-cache -f $BUDFILES/with-arg/Dockerfile
   run_buildah inspect -f '{{.FromImageID}}' args-cache
   expect_output --substring ${idbefore}
-  run_buildah rmi args-cache
 }
 
 @test "bud with --layers and --build-args: use raw ARG and cache should not be used" {
+  _prefetch alpine
   # when ARG is used as a raw value
   run_buildah build $WITH_POLICY_JSON --build-arg=FOO=1 --layers -t args-cache -f $BUDFILES/with-arg/Dockerfile2
   run_buildah inspect -f '{{.FromImageID}}' args-cache
@@ -1323,7 +2146,6 @@ _EOF
   run_buildah build $WITH_POLICY_JSON --build-arg=FOO=12 --layers -t args-cache -f $BUDFILES/with-arg/Dockerfile2
   run_buildah inspect -f '{{.FromImageID}}' args-cache
   idafter="$output"
-  run_buildah rmi args-cache
 
   assert "$idbefore" != "$idafter" \
          ".Args changed so final image id should be different"
@@ -1380,7 +2202,6 @@ _EOF
 @test "bud-with-unlimited-memory-swap" {
   target=scratch-image
   run_buildah build $WITH_POLICY_JSON --memory-swap -1 -t ${target} $BUDFILES/from-scratch
-  run_buildah rmi -f ${target}
 }
 
 @test "build with --no-cache and --layer" {
@@ -1428,6 +2249,14 @@ _EOF
   expect_output "[container=buildah date=tomorrow]" "No Path should be defined"
   run_buildah inspect --type=image --format '{{.Docker.Config.Env}}' docker-${target}
   expect_output "[container=buildah date=tomorrow]" "No Path should be defined"
+  cat > $mytmpdir/Containerfile << _EOF
+FROM oci-${target}
+_EOF
+  run_buildah build --format docker --unsetenv PATH --unsetenv foo $WITH_POLICY_JSON -t docker-${target} -f $mytmpdir/Containerfile .
+  run_buildah inspect --type=image --format '{{.OCIv1.Config.Env}}' docker-${target}
+  expect_output "[date=today container=buildah]" "No Path should be defined"
+  run_buildah inspect --type=image --format '{{.Docker.Config.Env}}' docker-${target}
+  expect_output "[date=today container=buildah]" "No Path should be defined"
 }
 
 @test "bud with --env" {
@@ -1447,6 +2276,12 @@ _EOF
   iid=$(cat ${TEST_SCRATCH_DIR}/output.iid)
   run_buildah inspect --format '{{.Docker.Config.Env}}' $iid
   expect_output "[]"
+
+  # Reference foo=baz from process environment
+  foo=baz run_buildah build --quiet=false --iidfile ${TEST_SCRATCH_DIR}/output.iid --env foo $WITH_POLICY_JSON -t ${target} $BUDFILES/from-scratch
+  iid=$(cat ${TEST_SCRATCH_DIR}/output.iid)
+  run_buildah inspect --format '{{.Docker.Config.Env}}' $iid
+  expect_output --substring "foo=baz"
 }
 
 @test "build with custom build output and output rootfs to directory" {
@@ -1506,7 +2341,7 @@ _EOF
   # Reuse cached layers and check if --output still works as expected
   run_buildah build --output type=local,dest=$mytmpdir/rootfs $WITH_POLICY_JSON -t test-bud -f $mytmpdir/Containerfile .
   ls $mytmpdir/rootfs
-  # exported rootfs must contain only 'target' from last/final stage and not contain file `rouge` from first stage
+  # exported rootfs must contain only 'target' from last/final stage and not contain file `rogue` from first stage
   expect_output --substring 'target'
   # must not contain rogue from first stage
   assert "$output" =~ "rogue"
@@ -1527,7 +2362,7 @@ _EOF
   # Reuse cached layers and check if --output still works as expected
   run_buildah build --output type=local,dest=$mytmpdir/rootfs $WITH_POLICY_JSON -t test-bud -f $mytmpdir/Containerfile .
   ls $mytmpdir/rootfs
-  # exported rootfs must contain only 'rouge' even if build from cache.
+  # exported rootfs must contain only 'rogue' even if build from cache.
   expect_output --substring 'rogue'
 }
 
@@ -1594,7 +2429,7 @@ RUN echo 'hello'> hello
 _EOF
   run_buildah 125 build --output type=tar, $WITH_POLICY_JSON -t test-bud -f $mytmpdir/Containerfile .
   expect_output --substring 'invalid'
-  run_buildah 125 build --output type=wrong,dest=hello --signature-policy ${TESTSDIR}/policy.json -t test-bud -f $mytmpdir/Containerfile .
+  run_buildah 125 build --output type=wrong,dest=hello $WITH_POLICY_JSON -t test-bud -f $mytmpdir/Containerfile .
   expect_output --substring 'invalid'
 }
 
@@ -1655,14 +2490,6 @@ _EOF
 
   want_output='map["io.buildah.version":"'$buildah_version'" "test":""]'
   run_buildah build --label test $WITH_POLICY_JSON -t ${target} $BUDFILES/from-scratch
-  run_buildah inspect --format '{{printf "%q" .Docker.Config.Labels}}' ${target}
-  expect_output "$want_output"
-}
-
-@test "bud-from-scratch-override-version-label" {
-  want_output='map["io.buildah.version":"oldversion"]'
-  target=scratch-image
-  run_buildah build --label "io.buildah.version=oldversion" $WITH_POLICY_JSON -t ${target} $BUDFILES/from-scratch
   run_buildah inspect --format '{{printf "%q" .Docker.Config.Labels}}' ${target}
   expect_output "$want_output"
 }
@@ -1744,6 +2571,93 @@ _EOF
   test -s $root/etc/passwd
 }
 
+@test "build using --layer-label and test labels on intermediate images" {
+  _prefetch alpine
+  label="l_$(random_string)"
+  labelvalue="v_$(random_string)"
+
+  run_buildah build --no-cache --layers --layer-label $label=$labelvalue --layer-label emptylabel $WITH_POLICY_JSON -t exp -f $BUDFILES/simple-multi-step/Containerfile
+
+  # Final image must not contain the layer-label
+  run_buildah inspect --format '{{ index .Docker.Config.Labels "'$label'"}}' exp
+  expect_output "" "label on actual image"
+
+  # Find all intermediate images...
+  run_buildah images -a --format '{{.ID}}' --filter intermediate=true
+  # ...and confirm that they have both $label and emptylabel
+  for image in "${lines[@]}";do
+    run_buildah inspect $image
+    inspect="$output"
+
+    run jq -r ".Docker.config.Labels.$label" <<<"$inspect"
+    assert "$output" = "$labelvalue" "label in intermediate layer $image"
+
+    run jq -r ".Docker.config.Labels.emptylabel" <<<"$inspect"
+    assert "$output" = "" "emptylabel in intermediate layer $image"
+  done
+}
+
+@test "bud and test --unsetlabel" {
+  base=registry.fedoraproject.org/fedora-minimal
+  _prefetch $base
+  target=exp
+
+  run_buildah --version
+  local -a output_fields=($output)
+  buildah_version=${output_fields[2]}
+
+  buildah inspect --format '{{ .Docker.Config.Labels }}' $base
+  not_want_output='map[]'
+  assert "$output" != "$not_want_output" "expected some labels to be set in base image $base"
+
+  labels=$(buildah inspect --format '{{ range $key, $value := .Docker.Config.Labels }}{{ $key }} {{end}}' $base)
+  labelflags="--label hello=world"
+  for label in $labels; do
+    if test $label != io.buildah.version ; then
+      labelflags="$labelflags --unsetlabel $label"
+    fi
+  done
+
+  run_buildah build $WITH_POLICY_JSON $labelflags -t $target --from $base $BUDFILES/base-with-labels
+
+  # no labels should be inherited from base image, only the buildah version label
+  # and `hello=world` which we just added using cli flag
+  want_output='map["hello":"world" "io.buildah.version":"'$buildah_version'"]'
+  run_buildah inspect --format '{{printf "%q" .Docker.Config.Labels}}' $target
+  expect_output "$want_output"
+}
+
+@test "build using intermediate images should not inherit label" {
+  _prefetch alpine
+
+  # Build imageone, with a label
+  run_buildah build --no-cache --layers --label somefancylabel=true $WITH_POLICY_JSON -t imageone -f Dockerfile.name $BUDFILES/multi-stage-builds
+  run_buildah inspect --format '{{ index .Docker.Config.Labels "somefancylabel"}}' imageone
+  expect_output "true" "imageone: somefancylabel"
+
+  # Build imagetwo. Must use all steps from cache but should not contain label
+  run_buildah build --layers $WITH_POLICY_JSON -t imagetwo -f Dockerfile.name $BUDFILES/multi-stage-builds
+  for i in 2 6;do
+      expect_output --substring --from="${lines[$i]}" "Using cache" \
+                    "build imagetwo (no label), line $i"
+  done
+  run_buildah inspect --format '{{ index .Docker.Config.Labels "somefancylabel"}}' imagetwo
+  expect_output "" "imagetwo: somefancylabel"
+
+  # build another multi-stage image with different label, it should use stages from cache from previous build
+  run_buildah build --layers $WITH_POLICY_JSON --label anotherfancylabel=true -t imagethree -f Dockerfile.name $BUDFILES/multi-stage-builds
+  for i in 2 6;do
+      expect_output --substring --from="${lines[$i]}" "Using cache" \
+                    "build imagethree ('anotherfancylabel'), line $i"
+  done
+
+  run_buildah inspect --format '{{ index .Docker.Config.Labels "somefancylabel"}}' imagethree
+  expect_output "" "imagethree: somefancylabel"
+
+  run_buildah inspect --format '{{ index .Docker.Config.Labels "anotherfancylabel"}}' imagethree
+  expect_output "true" "imagethree: anotherfancylabel"
+}
+
 @test "bud-multi-stage-builds" {
   _prefetch alpine
   target=multi-stage-index
@@ -1805,6 +2719,7 @@ _EOF
   run_buildah rm ${cid}
   run_buildah rmi -a
 
+  _prefetch alpine
   target=multi-stage-mixed
   run_buildah build $WITH_POLICY_JSON -t ${target} -f $BUDFILES/multi-stage-builds-small-as/Dockerfile.mixed $BUDFILES/multi-stage-builds-small-as
   run_buildah from --quiet ${target}
@@ -1821,32 +2736,47 @@ _EOF
   skip_if_no_runtime
 
   _prefetch alpine
-  target=volume-image
-  run_buildah build $WITH_POLICY_JSON -t ${target} $BUDFILES/preserve-volumes
-  run_buildah from --quiet ${target}
-  cid=$output
-  run_buildah mount ${cid}
-  root=$output
-  test -s $root/vol/subvol/subsubvol/subsubvolfile
-  test ! -s $root/vol/subvol/subvolfile
-  test -s $root/vol/volfile
-  test -s $root/vol/Dockerfile
-  test -s $root/vol/Dockerfile2
-  test ! -s $root/vol/anothervolfile
+  for layers in "" --layers ; do
+    for compat in "" --compat-volumes ; do
+      target=volume-image$compat$layers
+      run_buildah build $WITH_POLICY_JSON -t ${target} ${layers} ${compat} $BUDFILES/preserve-volumes
+      run_buildah from --quiet ${target}
+      cid=$output
+      run_buildah mount ${cid}
+      root=$output
+      # these files were created before VOLUME instructions froze the directories that contained them
+      test -s $root/vol/subvol/subsubvol/subsubvolfile
+      test -s $root/vol/volfile
+      if test "$compat" != "" ; then
+        # true, these files should have been discarded after they were created by RUN instructions
+        test ! -s $root/vol/subvol/subvolfile
+        test ! -s $root/vol/anothervolfile
+      else
+        # false, these files should not have been discarded, despite being created by RUN instructions
+        test -s $root/vol/subvol/subvolfile
+        test -s $root/vol/anothervolfile
+      fi
+      # and these were ADDed
+      test -s $root/vol/Dockerfile
+      test -s $root/vol/Dockerfile2
+      run_buildah rm ${cid}
+      run_buildah rmi ${target}
+    done
+  done
 }
 
 # Helper function for several of the tests which pull from http.
 #
 #  Usage:  _test_http  SUBDIRECTORY  URL_PATH  [EXTRA ARGS]
 #
-#     SUBDIRECTORY   is a subdirectory path under the 'buds' subdirectory.
+#     SUBDIRECTORY   is a subdirectory path under the 'bud' subdirectory.
 #                    This will be the argument to starthttpd(), i.e. where
 #                    the httpd will serve files.
 #
 #     URL_PATH       is the path requested by buildah from the http server,
 #                    probably 'Dockerfile' or 'context.tar'
 #
-#     [EXTRA ARGS]   if present, will be passed to buildah on the 'bud'
+#     [EXTRA ARGS]   if present, will be passed to buildah on the 'build'
 #                    command line; it is intended for '-f subdir/Dockerfile'.
 #
 function _test_http() {
@@ -1861,6 +2791,39 @@ function _test_http() {
 	      http://0.0.0.0:${HTTP_SERVER_PORT}/$urlpath
   stophttpd
   run_buildah from ${target}
+}
+
+# Helper function for several of the tests which verifies compression.
+#
+#  Usage:  validate_instance_compression INDEX MANIFEST ARCH COMPRESSION
+#
+#     INDEX             instance which needs to be verified in
+#                       provided manifest list.
+#
+#     MANIFEST          OCI manifest specification in json format
+#
+#     ARCH              instance architecture
+#
+#     COMPRESSION       compression algorithm name; e.g "zstd".
+#
+function validate_instance_compression {
+  case $4 in
+
+   gzip)
+    run jq -r '.manifests['$1'].annotations' <<< $2
+    # annotation is `null` for gzip compression
+    assert "$output" = "null" ".manifests[$1].annotations (null means gzip)"
+    ;;
+
+  zstd)
+    # annotation `'"io.github.containers.compression.zstd": "true"'` must be there for zstd compression
+    run jq -r '.manifests['$1'].annotations."io.github.containers.compression.zstd"' <<< $2
+    assert "$output" = "true" ".manifests[$1].annotations.'io.github.containers.compression.zstd' (io.github.containers.compression.zstd must be set)"
+    ;;
+  esac
+
+  run jq -r '.manifests['$1'].platform.architecture' <<< $2
+  assert "$output" = $3 ".manifests[$1].platform.architecture"
 }
 
 @test "bud-http-Dockerfile" {
@@ -1959,16 +2922,16 @@ function _test_http() {
 }
 
 @test "bud-github-context-with-branch-subdir-commit" {
+  subdir=tests/bud/from-scratch
   target=github-image
-  gitrepo=https://github.com/containers/podman.git#main:contrib/hello
+  gitrepo=https://github.com/containers/buildah.git#main:$subdir
   run_buildah build $WITH_POLICY_JSON -t ${target} "${gitrepo}"
   # check syntax only for subdirectory
-  gitrepo=https://github.com/containers/podman.git#:contrib/hello
+  gitrepo=https://github.com/containers/buildah.git#:$subdir
   run_buildah build $WITH_POLICY_JSON -t ${target} "${gitrepo}"
   # Try pulling repo with specific commit
-  # `contrib/helloimage` is only present on or before `40ba9f10e5fbdd3c9d36389107b8bf1caec6cef0`
-  # hence following test verifies if we are fetching the right commit.
-  gitrepo=https://github.com/containers/podman.git#40ba9f10e5fbdd3c9d36389107b8bf1caec6cef0:contrib/helloimage
+  # This commit is the initial commit, which used Dockerfile rather then Containerfile
+  gitrepo=https://github.com/containers/buildah.git#761597056c8dc2bb1efd67e937a196ddff1fa7a6:$subdir
   run_buildah build $WITH_POLICY_JSON -t ${target} "${gitrepo}"
 }
 
@@ -2021,16 +2984,33 @@ function _test_http() {
   skip_if_no_runtime
 
   _prefetch alpine
-  target=volume-image
-  run_buildah build $WITH_POLICY_JSON -t ${target} $BUDFILES/volume-perms
-  run_buildah from --quiet $WITH_POLICY_JSON ${target}
-  cid=$output
-  run_buildah mount ${cid}
-  root=$output
-  test ! -s $root/vol/subvol/subvolfile
-  run stat -c %f $root/vol/subvol
-  [ "$status" -eq 0 ]
-  expect_output "41ed" "stat($root/vol/subvol) [0x41ed = 040755]"
+  for layers in "" --layers ; do
+    for compat in "" --compat-volumes ; do
+      target=volume-image$compat$layers
+      run_buildah build $WITH_POLICY_JSON -t ${target} ${layers} ${compat} $BUDFILES/volume-perms
+      run_buildah from --quiet $WITH_POLICY_JSON ${target}
+      cid=$output
+      run_buildah mount ${cid}
+      root=$output
+      if test "$compat" != "" ; then
+        # true, /vol/subvol should not have contents, and its permissions should be the default 0755
+        test -d $root/vol/subvol
+        test ! -s $root/vol/subvol/subvolfile
+        run stat -c %a $root/vol/subvol
+        assert "$status" -eq 0 "status code from stat $root/vol/subvol"
+        expect_output "755" "stat($root/vol/subvol)"
+      else
+        # true, /vol/subvol should have contents, and its permissions should be the changed 0711
+        test -d $root/vol/subvol
+        test -s $root/vol/subvol/subvolfile
+        run stat -c %a $root/vol/subvol
+        assert "$status" -eq 0 "status code from stat $root/vol/subvol"
+        expect_output "711" "stat($root/vol/subvol)"
+      fi
+      run_buildah rm ${cid}
+      run_buildah rmi ${target}
+    done
+  done
 }
 
 @test "bud-volume-ownership" {
@@ -2145,12 +3125,12 @@ function _test_http() {
   run_buildah mount ${cid}
   root=$output
   run ls $root/data/log
-  [ "$status" -eq 0 ]
+  assert "$status" -eq 0 "status from ls $root/data/log"
   expect_output --substring "test"     "ls \$root/data/log"
   expect_output --substring "blah.txt" "ls \$root/data/log"
 
   run ls -al $root
-  [ "$status" -eq 0 ]
+  assert "$status" -eq 0 "status from ls -al $root"
   expect_output --substring "test-log -> /data/log" "ls -l \$root/data/log"
   expect_output --substring "blah -> /test-log"     "ls -l \$root/data/log"
 }
@@ -2164,11 +3144,11 @@ function _test_http() {
   run_buildah mount ${cid}
   root=$output
   run ls $root/log
-  [ "$status" -eq 0 ]
+  assert "$status" -eq 0 "status from ls $root/log"
   expect_output --substring "test" "ls \$root/log"
 
   run ls -al $root
-  [ "$status" -eq 0 ]
+  assert "$status" -eq 0 "status from ls -al $root"
   expect_output --substring "test-log -> ../log" "ls -l \$root/log"
   test -r $root/var/data/empty
 }
@@ -2182,20 +3162,20 @@ function _test_http() {
   run_buildah mount ${cid}
   root=$output
   run ls $root/data/log
-  [ "$status" -eq 0 ]
+  assert "$status" -eq 0 "status from ls $root/data/log"
   expect_output --substring "bin"      "ls \$root/data/log"
   expect_output --substring "blah.txt" "ls \$root/data/log"
 
   run ls -al $root/myuser
-  [ "$status" -eq 0 ]
+  assert "$status" -eq 0 "status from ls -al $root/myuser"
   expect_output --substring "log -> /test" "ls -al \$root/myuser"
 
   run ls -al $root/test
-  [ "$status" -eq 0 ]
+  assert "$status" -eq 0 "status from ls -al $root/test"
   expect_output --substring "bar -> /test-log" "ls -al \$root/test"
 
   run ls -al $root/test-log
-  [ "$status" -eq 0 ]
+  assert "$status" -eq 0 "status from ls -al $root/test-log"
   expect_output --substring "foo -> /data/log" "ls -al \$root/test-log"
 }
 
@@ -2215,11 +3195,11 @@ function _test_http() {
   run_buildah mount ${cid}
   root=$output
   run ls $root/bin
-  [ "$status" -eq 0 ]
+  assert "$status" -eq 0 "status from ls $root/bin"
   expect_output --substring "myexe" "ls \$root/bin"
 
   run cat $root/bin/myexe
-  [ "$status" -eq 0 ]
+  assert "$status" -eq 0 "status from cat $root/bin/myexe"
   expect_output "symlink-test" "cat \$root/bin/myexe"
 }
 
@@ -2232,7 +3212,7 @@ function _test_http() {
   run_buildah mount ${cid}
   root=$output
   run ls $root/data
-  [ "$status" -eq 0 ]
+  assert "$status" -eq 0 "status from ls $root/data"
   expect_output --substring "myexe" "ls \$root/data"
 }
 
@@ -2552,7 +3532,7 @@ _EOF
   imgName=alpine-image
   ctrName=alpine-chown
   run_buildah 125 build $WITH_POLICY_JSON --layers -t ${imgName} -f $BUDFILES/copy-chown/Dockerfile.bad $BUDFILES/copy-chown
-  expect_output --substring "COPY only supports the --chmod=<permissions> --chown=<uid:gid> and the --from=<image\|stage> flags"
+  expect_output --substring "COPY only supports the --chmod=<permissions> --chown=<uid:gid> --from=<image\|stage> and the --exclude=<pattern> flags"
 }
 
 @test "bud with chown copy with unknown substitutions in Dockerfile" {
@@ -2580,7 +3560,7 @@ _EOF
   imgName=alpine-image
   ctrName=alpine-chmod
   run_buildah 125 build $WITH_POLICY_JSON --layers -t ${imgName} -f $BUDFILES/copy-chmod/Dockerfile.bad $BUDFILES/copy-chmod
-  expect_output --substring "COPY only supports the --chmod=<permissions> --chown=<uid:gid> and the --from=<image\|stage> flags"
+  expect_output --substring "COPY only supports the --chmod=<permissions> --chown=<uid:gid> --from=<image\|stage> and the --exclude=<pattern> flags"
 }
 
 @test "bud with chmod add" {
@@ -2616,7 +3596,7 @@ _EOF
   imgName=alpine-image
   ctrName=alpine-chown
   run_buildah 125 build $WITH_POLICY_JSON --layers -t ${imgName} -f $BUDFILES/add-chown/Dockerfile.bad $BUDFILES/add-chown
-  expect_output --substring "ADD only supports the --chmod=<permissions> and the --chown=<uid:gid> flags"
+  expect_output --substring "ADD only supports the --chmod=<permissions>, --chown=<uid:gid>, and --checksum=<checksum> --exclude=<pattern> flags"
 }
 
 @test "bud with chmod add with bad chmod flag in Dockerfile with --layers" {
@@ -2624,7 +3604,30 @@ _EOF
   imgName=alpine-image
   ctrName=alpine-chmod
   run_buildah 125 build $WITH_POLICY_JSON --layers -t ${imgName} -f $BUDFILES/add-chmod/Dockerfile.bad $BUDFILES/add-chmod
-  expect_output --substring "ADD only supports the --chmod=<permissions> and the --chown=<uid:gid> flags"
+  expect_output --substring "ADD only supports the --chmod=<permissions>, --chown=<uid:gid>, and --checksum=<checksum> --exclude=<pattern> flags"
+}
+
+@test "bud with ADD with checksum flag" {
+  _prefetch alpine
+  target=alpine-image
+  run_buildah build $WITH_POLICY_JSON -t alpine-image -f $BUDFILES/add-checksum/Containerfile $BUDFILES/add-checksum
+  run_buildah from --quiet $WITH_POLICY_JSON --name alpine-ctr alpine-image
+  run_buildah run alpine-ctr -- ls -l /README.md
+  expect_output --substring "README.md"
+}
+
+@test "bud with ADD with bad checksum" {
+  _prefetch alpine
+  target=alpine-image
+  run_buildah 125 build $WITH_POLICY_JSON -t ${target} -f $BUDFILES/add-checksum/Containerfile.bad-checksum $BUDFILES/add-checksum
+  expect_output --substring "unexpected response digest for \"https://raw.githubusercontent.com/containers/buildah/bf3b55ba74102cc2503eccbaeffe011728d46b20/README.md\": sha256:4fd3aed66b5488b45fe83dd11842c2324fadcc38e1217bb45fbd28d660afdd39, want sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}
+
+@test "bud with ADD with bad checksum flag" {
+  _prefetch alpine
+  target=alpine-image
+  run_buildah 125 build $WITH_POLICY_JSON -t ${target} -f $BUDFILES/add-checksum/Containerfile.bad $BUDFILES/add-checksum
+  expect_output --substring "ADD only supports the --chmod=<permissions>, --chown=<uid:gid>, and --checksum=<checksum> --exclude=<pattern> flags"
 }
 
 @test "bud with ADD file construct" {
@@ -2719,7 +3722,7 @@ _EOF
   imgName=ubuntu-image
   ctrName=ubuntu-copy
   run_buildah 125 build $WITH_POLICY_JSON -f $BUDFILES/copy-multistage-paths/Dockerfile.invalid_from -t ${imgName} $BUDFILES/copy-multistage-paths
-  expect_output --substring "COPY only supports the --chmod=<permissions> --chown=<uid:gid> and the --from=<image\|stage> flags"
+  expect_output --substring "COPY only supports the --chmod=<permissions> --chown=<uid:gid> --from=<image\|stage> and the --exclude=<pattern> flags"
 }
 
 @test "bud COPY to root succeeds" {
@@ -2794,18 +3797,6 @@ _EOF
   expect_output --substring "FROM alpine"
 }
 
-@test "bud with dir for file but no Dockerfile in dir" {
-  target=alpine-image
-  run_buildah 125 build $WITH_POLICY_JSON -t ${target} -f $BUDFILES/empty-dir $BUDFILES/empty-dir
-  expect_output --substring "no such file or directory"
-}
-
-@test "bud with bad dir Dockerfile" {
-  target=alpine-image
-  run_buildah 125 build $WITH_POLICY_JSON -t ${target} -f ${TEST_SOURCES}/baddirname ${TEST_SOURCES}/baddirname
-  expect_output --substring "no such file or directory"
-}
-
 @test "bud with ARG before FROM default value" {
   _prefetch busybox
   target=leading-args-default
@@ -2817,21 +3808,26 @@ _EOF
   target=leading-args
   run_buildah build $WITH_POLICY_JSON -t ${target} --build-arg=VERSION=musl -f $BUDFILES/leading-args/Dockerfile $BUDFILES/leading-args
 
-  #Verify https://github.com/containers/buildah/issues/4312
+  # Verify https://github.com/containers/buildah/issues/4312
   # stage `FROM stage_${my_env}` must be resolved with default arg value and build should be successful.
   run_buildah build $WITH_POLICY_JSON -t source -f $BUDFILES/multi-stage-builds/Dockerfile.arg_in_stage
+
+  # Verify https://github.com/containers/buildah/issues/4573
+  # stage `COPY --from=stage_${my_env}` must be resolved with default arg value and build should be successful.
+  run_buildah build $WITH_POLICY_JSON -t source -f $BUDFILES/multi-stage-builds/Dockerfile.arg_in_copy
 }
 
 @test "bud-with-healthcheck" {
   _prefetch alpine
   target=alpine-image
   run_buildah build $WITH_POLICY_JSON -t ${target} --format docker $BUDFILES/healthcheck
-  run_buildah inspect -f '{{printf "%q" .Docker.Config.Healthcheck.Test}} {{printf "%d" .Docker.Config.Healthcheck.StartPeriod}} {{printf "%d" .Docker.Config.Healthcheck.Interval}} {{printf "%d" .Docker.Config.Healthcheck.Timeout}} {{printf "%d" .Docker.Config.Healthcheck.Retries}}' ${target}
+  run_buildah inspect -f '{{printf "%q" .Docker.Config.Healthcheck.Test}} {{printf "%d" .Docker.Config.Healthcheck.StartInterval}} {{printf "%d" .Docker.Config.Healthcheck.StartPeriod}} {{printf "%d" .Docker.Config.Healthcheck.Interval}} {{printf "%d" .Docker.Config.Healthcheck.Timeout}} {{printf "%d" .Docker.Config.Healthcheck.Retries}}' ${target}
   second=1000000000
   threeseconds=$(( 3 * $second ))
+  thirtyseconds=$(( 30 * $second ))
   fiveminutes=$(( 5 * 60 * $second ))
   tenminutes=$(( 10 * 60 * $second ))
-  expect_output '["CMD-SHELL" "curl -f http://localhost/ || exit 1"]'" $tenminutes $fiveminutes $threeseconds 4" "Healthcheck config"
+  expect_output '["CMD-SHELL" "curl -f http://localhost/ || exit 1"]'" $thirtyseconds $tenminutes $fiveminutes $threeseconds 4" "Healthcheck config"
 }
 
 @test "bud with unused build arg" {
@@ -2846,7 +3842,6 @@ _EOF
 
 @test "bud with copy-from and cache" {
   _prefetch busybox
-  target=busybox-image
   run_buildah build $WITH_POLICY_JSON --layers --iidfile ${TEST_SCRATCH_DIR}/iid1 -f $BUDFILES/copy-from/Dockerfile2 $BUDFILES/copy-from
   cat ${TEST_SCRATCH_DIR}/iid1
   test -s ${TEST_SCRATCH_DIR}/iid1
@@ -2857,7 +3852,8 @@ _EOF
 }
 
 @test "bud with copy-from in Dockerfile no prior FROM" {
-  _prefetch busybox quay.io/libpod/testimage:20210610
+  want_tag=20221018
+  _prefetch busybox quay.io/libpod/testimage:$want_tag
   target=no-prior-from
   run_buildah build $WITH_POLICY_JSON -t ${target} -f $BUDFILES/copy-from/Dockerfile $BUDFILES/copy-from
 
@@ -2868,14 +3864,14 @@ _EOF
 
   newfile="/home/busyboxpodman/copied-testimage-id"
   test -e $mnt/$newfile
-  expect_output --from="$(< $mnt/$newfile)" "20210610" "Contents of $newfile"
+  expect_output --from="$(< $mnt/$newfile)" "$want_tag" "Contents of $newfile"
 }
 
 @test "bud with copy-from with bad from flag in Dockerfile with --layers" {
   _prefetch busybox
   target=bad-from-flag
   run_buildah 125 build $WITH_POLICY_JSON --layers -t ${target} -f $BUDFILES/copy-from/Dockerfile.bad $BUDFILES/copy-from
-  expect_output --substring "COPY only supports the --chmod=<permissions> --chown=<uid:gid> and the --from=<image\|stage> flags"
+  expect_output --substring "COPY only supports the --chmod=<permissions> --chown=<uid:gid> --from=<image\|stage> and the --exclude=<pattern> flags"
 }
 
 @test "bud with copy-from referencing the base image" {
@@ -2930,8 +3926,6 @@ _EOF
 
 @test "bud-multi-stage-nocache-nocommit" {
   _prefetch alpine
-  # pull the base image directly, so that we don't record it being written to local storage in the next step
-  run_buildah pull $WITH_POLICY_JSON alpine
   # okay, build an image with two stages
   run_buildah --log-level=debug bud $WITH_POLICY_JSON -f $BUDFILES/multi-stage-builds/Dockerfile.name $BUDFILES/multi-stage-builds
   # debug messages should only record us creating one new image: the one for the second stage, since we don't base anything on the first
@@ -3306,22 +4300,24 @@ _EOF
 }
 
 @test "bud with specified context should fail if directory contains no Dockerfile" {
-  run_buildah 125 build $WITH_POLICY_JSON "$TEST_SCRATCH_DIR"
+  mkdir -p $TEST_SCRATCH_DIR/empty-dir
+  run_buildah 125 build $WITH_POLICY_JSON "$TEST_SCRATCH_DIR"/empty-dir
   expect_output --substring "no such file or directory"
 }
 
-@test "bud with specified context should fail if assumed Dockerfile is a directory" {
+@test "bud with specified context should fail if Dockerfile in context directory is actually a file" {
   mkdir -p "$TEST_SCRATCH_DIR"/Dockerfile
   run_buildah 125 build $WITH_POLICY_JSON "$TEST_SCRATCH_DIR"
   expect_output --substring "is not a file"
 }
 
-@test "bud with specified context should fail if context contains not-existing Dockerfile" {
+@test "bud with specified context should fail if context directory does not exist" {
   run_buildah 125 build $WITH_POLICY_JSON "$TEST_SCRATCH_DIR"/Dockerfile
   expect_output --substring "no such file or directory"
 }
 
 @test "bud with specified context should succeed if context contains existing Dockerfile" {
+  _prefetch alpine
   echo "FROM alpine" > $TEST_SCRATCH_DIR/Dockerfile
   run_buildah bud $WITH_POLICY_JSON $TEST_SCRATCH_DIR/Dockerfile
 }
@@ -3377,6 +4373,7 @@ _EOF
 
 # Following test must pass for both rootless and rootfull
 @test "rootless: support --device and renaming device using bind-mount" {
+  _prefetch alpine
   skip_if_in_container # unable to perform mount of /dev/null for test in CI container setup
   local contextdir=${TEST_SCRATCH_DIR}/bud/platform
   mkdir -p $contextdir
@@ -3567,6 +4564,9 @@ _EOF
   run_buildah 125 build $WITH_POLICY_JSON -t ${target} --pull-never $BUDFILES/pull
   expect_output --substring "busybox: image not known"
 
+  run_buildah 125 build $WITH_POLICY_JSON -t ${target} --pull=false $BUDFILES/pull
+  expect_output --substring "busybox: image not known"
+
   run_buildah build $WITH_POLICY_JSON -t ${target} --pull $BUDFILES/pull
   expect_output --substring "COMMIT pull"
 
@@ -3576,14 +4576,14 @@ _EOF
 
 @test "bud pull false no local image" {
   target=pull
-  run_buildah build $WITH_POLICY_JSON -t ${target} --pull=false $BUDFILES/pull
-  expect_output --substring "COMMIT pull"
+  run_buildah 125 build $WITH_POLICY_JSON -t ${target} --pull=false $BUDFILES/pull
+  expect_output --substring "Error: creating build container: busybox: image not known"
 }
 
 @test "bud with Containerfile should fail with nonexistent authfile" {
   target=alpine-image
   run_buildah 125 build --authfile /tmp/nonexistent $WITH_POLICY_JSON -t ${target} $BUDFILES/containerfile
-  expect_output "Error: checking authfile: stat /tmp/nonexistent: no such file or directory"
+  assert "$output" =~ "Error: credential file is not accessible: (faccessat|stat) /tmp/nonexistent: no such file or directory"
 }
 
 
@@ -3767,6 +4767,73 @@ EOM
   expect_output ""
 }
 
+@test "bud-implicit-no-history" {
+  _prefetch busybox
+  local ocidir=${TEST_SCRATCH_DIR}/oci
+  mkdir -p $ocidir/blobs/sha256
+  # Build an image config and image manifest in parallel
+  local configos=$(${BUILDAH_BINARY} info --format '{{.host.os}}')
+  local configarch=$(${BUILDAH_BINARY} info --format '{{.host.arch}}')
+  local configvariant=$(${BUILDAH_BINARY} info --format '{{.host.variant}}')
+  local configvariantkv=${configvariant:+'"variant": "'${configvariant}'", '}
+  echo '{"architecture": "'"${configarch}"'", "os": "'"${configos}"'", '"${configvariantkv}"'"rootfs": {"type": "layers", "diff_ids": [' > ${TEST_SCRATCH_DIR}/config.json
+  echo '{"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "layers": [' > ${TEST_SCRATCH_DIR}/manifest.json
+  # Create some layers
+  for layer in $(seq 8) ; do
+    # Content for the layer
+    createrandom ${TEST_SCRATCH_DIR}/file$layer $((RANDOM+1024))
+    # Layer blob
+    tar -c -C ${TEST_SCRATCH_DIR} -f ${TEST_SCRATCH_DIR}/layer$layer.tar file$layer
+    # Get the layer blob's digest and size
+    local diffid=$(sha256sum ${TEST_SCRATCH_DIR}/layer$layer.tar)
+    local diffsize=$(wc -c ${TEST_SCRATCH_DIR}/layer$layer.tar)
+    # Link the blob into where an OCI layout would put it.
+    ln ${TEST_SCRATCH_DIR}/layer$layer.tar $ocidir/blobs/sha256/${diffid%% *}
+    # Try to keep the resulting files at least kind of readable.
+    if test $layer -gt 1 ; then
+      echo "," >> ${TEST_SCRATCH_DIR}/config.json
+      echo "," >> ${TEST_SCRATCH_DIR}/manifest.json
+    fi
+    # Add the layer to the config blob's list of diffIDs for its rootfs.
+    echo -n '  "sha256:'${diffid%% *}'"' >> ${TEST_SCRATCH_DIR}/config.json
+    # Add the layer blob to the manifest's list of blobs.
+    echo -n '  {"mediaType": "application/vnd.oci.image.layer.v1.tar", "digest": "sha256:'${diffid%% *}'", "size": '${diffsize%% *}'}' >> ${TEST_SCRATCH_DIR}/manifest.json
+  done
+  # Finish the diffID and layer blob lists.
+  echo >> ${TEST_SCRATCH_DIR}/config.json
+  echo >> ${TEST_SCRATCH_DIR}/manifest.json
+  # Finish the config blob with some boilerplate stuff.
+  echo ']}, "config": { "Cmd": ["/bin/sh"], "Env": [ "PATH=/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin" ]}}' >> ${TEST_SCRATCH_DIR}/config.json
+  # Compute the config blob's digest and size, so that we can list it in the manifest.
+  local configsize=$(wc -c ${TEST_SCRATCH_DIR}/config.json)
+  local configdigest=$(sha256sum ${TEST_SCRATCH_DIR}/config.json)
+  # Finish the manifest with information about the config blob.
+  echo '], "config": { "mediaType": "application/vnd.oci.image.config.v1+json", "digest": "sha256:'${configdigest%% *}'", "size": '${configsize%% *}'}}' >> ${TEST_SCRATCH_DIR}/manifest.json
+  # Compute the manifest's digest and size, so that we can list it in the OCI layout index.
+  local manifestsize=$(wc -c ${TEST_SCRATCH_DIR}/manifest.json)
+  local manifestdigest=$(sha256sum ${TEST_SCRATCH_DIR}/manifest.json)
+  # Link the config blob and manifest into where an OCI layout would put them.
+  ln ${TEST_SCRATCH_DIR}/config.json $ocidir/blobs/sha256/${configdigest%% *}
+  ln ${TEST_SCRATCH_DIR}/manifest.json $ocidir/blobs/sha256/${manifestdigest%% *}
+  # Write the layout index with just the one image manifest in it.
+  echo '{"schemaVersion": 2, "manifests": [ {"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": "sha256:'${manifestdigest%% *}'", "size": '${manifestsize%% *}' } ]}' > $ocidir/index.json
+  # Write the "this is an OCI layout directory" identifier.
+  echo '{"imageLayoutVersion":"1.0.0"}' > $ocidir/oci-layout
+  # Import the image from the OCI layout into buildah's normal storage.
+  run_buildah pull --log-level=debug $WITH_POLICY_JSON oci:$ocidir
+  # Tag the image (we know its ID is the config blob digest, since it's an OCI
+  # image) with the name the Dockerfile will specify as its base image.
+  run_buildah tag ${configdigest%% *} fakeregistry.podman.invalid/notreal
+  # Double-check that the image has no history, which is what we wanted to get
+  # out of all of this.
+  run_buildah inspect --format '{{.History}}' fakeregistry.podman.invalid/notreal
+  assert "${lines}" == '[]'  "base image generated for test had history field that was not an empty slice"
+  # Build images using our image-with-no-history as a base, to check that we
+  # don't trip over ourselves when doing so.
+  run_buildah build $WITH_POLICY_JSON --pull=never --layers=false $BUDFILES/no-history
+  run_buildah build $WITH_POLICY_JSON --pull=never --layers=true  $BUDFILES/no-history
+}
+
 @test "bud with encrypted FROM image" {
   _prefetch busybox
   local contextdir=${TEST_SCRATCH_DIR}/tmp
@@ -3782,7 +4849,7 @@ EOM
 
   # Try to build from encrypted image without key
   run_buildah 125 build $WITH_POLICY_JSON --tls-verify=false  --creds testuser:testpassword -t ${target} -f $contextdir/Dockerfile
-  assert "$output" =~ "missing private key needed for decryption"
+  assert "$output" =~ "does not match config's DiffID"
 
   # Try to build from encrypted image with wrong key
   run_buildah 125 build $WITH_POLICY_JSON --tls-verify=false  --creds testuser:testpassword --decryption-key $contextdir/mykey2.pem -t ${target} -f $contextdir/Dockerfile
@@ -3815,15 +4882,19 @@ EOM
 }
 
 @test "bud arg and env var with same name" {
+  _prefetch busybox
   # Regression test for https://github.com/containers/buildah/issues/2345
   run_buildah build $WITH_POLICY_JSON -t testctr $BUDFILES/dupe-arg-env-name
   expect_output --substring "https://example.org/bar"
 }
 
 @test "bud copy chown with newuser" {
+  _prefetch $SAFEIMAGE
   # Regression test for https://github.com/containers/buildah/issues/2192
-  run_buildah build $WITH_POLICY_JSON -t testctr -f $BUDFILES/copy-chown/Containerfile.chown_user $BUDFILES/copy-chown
-  expect_output --substring "myuser myuser"
+  run_buildah build $WITH_POLICY_JSON -t testctr \
+              --build-arg SAFEIMAGE=$SAFEIMAGE \
+              -f $BUDFILES/copy-chown/Containerfile.chown_user $BUDFILES/copy-chown
+  expect_output --substring "myuser:myuser"
 }
 
 @test "bud-builder-identity" {
@@ -3843,8 +4914,7 @@ EOM
   skip_if_no_runtime
 
   ${OCI} --version
-  _prefetch alpine
-  _prefetch debian
+  _prefetch alpine busybox
 
   run_buildah build --build-arg base=alpine --build-arg toolchainname=busybox --build-arg destinationpath=/tmp --pull=false $WITH_POLICY_JSON -f $BUDFILES/from-with-arg/Containerfile .
   expect_output --substring "FROM alpine"
@@ -3993,10 +5063,12 @@ EOF
 }
 
 @test "bud cache by format" {
+  _prefetch alpine
+
   # Build first in Docker format.  Whether we do OCI or Docker first shouldn't matter, so we picked one.
   run_buildah build --iidfile ${TEST_SCRATCH_DIR}/first-docker  --format docker --layers --quiet $WITH_POLICY_JSON $BUDFILES/cache-format
 
-  # Build in OCI format.  Cache should not re-use the same images, so we should get a different image ID.
+  # Build in OCI format.  Cache should not reuse the same images, so we should get a different image ID.
   run_buildah build --iidfile ${TEST_SCRATCH_DIR}/first-oci     --format oci    --layers --quiet $WITH_POLICY_JSON $BUDFILES/cache-format
 
   # Build in Docker format again.  Cache traversal should 100% hit the Docker image, so we should get its image ID.
@@ -4059,6 +5131,7 @@ EOF
 }
 
 @test "bud-terminal" {
+  _prefetch busybox
   run_buildah build $BUDFILES/terminal
 }
 
@@ -4239,20 +5312,20 @@ _EOF
   expect_output --substring image-a
 }
 
-@test "bud --pull=false --arch test" {
+@test "bud --pull=ifmissing --arch test" {
   mytmpdir=${TEST_SCRATCH_DIR}/my-dir
   mkdir -p ${mytmpdir}
 cat > $mytmpdir/Containerfile << _EOF
 FROM $SAFEIMAGE
 _EOF
-  run_buildah build --pull=false -q --arch=amd64 -t image-amd $WITH_POLICY_JSON ${mytmpdir}
+  run_buildah build --pull=ifmissing -q --arch=amd64 -t image-amd $WITH_POLICY_JSON ${mytmpdir}
   run_buildah inspect --format '{{ .OCIv1.Architecture }}' image-amd
   expect_output amd64
 
   # Tag the image to localhost/safeimage to make sure that the image gets
   # pulled since the local one does not match the requested architecture.
   run_buildah tag image-amd localhost/${SAFEIMAGE_NAME}:${SAFEIMAGE_TAG}
-  run_buildah build --pull=false -q --arch=arm64 -t image-arm $WITH_POLICY_JSON ${mytmpdir}
+  run_buildah build --pull=ifmissing -q --arch=arm64 -t image-arm $WITH_POLICY_JSON ${mytmpdir}
   run_buildah inspect --format '{{ .OCIv1.Architecture }}' image-arm
   expect_output arm64
 
@@ -4346,7 +5419,7 @@ _EOF
   expect_output --substring "Setting --no-cache=true"
 }
 
-@test "build test pushing and pulling from remote cache sources" {
+@test "build test pushing and pulling from multiple remote cache sources" {
   _prefetch alpine
   mytmpdir=${TEST_SCRATCH_DIR}/my-dir
   mkdir -p ${mytmpdir}
@@ -4387,7 +5460,7 @@ _EOF
   step6=$output
 
   # actually run build
-  run_buildah build $WITH_POLICY_JSON --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth --layers --cache-to localhost:${REGISTRY_PORT}/temp -t test -f ${mytmpdir}/Containerfile ${mytmpdir}
+  run_buildah build $WITH_POLICY_JSON --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth --layers --cache-to localhost:${REGISTRY_PORT}/temp2 --cache-to localhost:${REGISTRY_PORT}/temp -t test -f ${mytmpdir}/Containerfile ${mytmpdir}
   expect_output --substring "$step1"
   expect_output --substring "$step2"
   expect_output --substring "$step3"
@@ -4415,6 +5488,121 @@ _EOF
   step4=$output
   # First run step in second stage should not be pulled since its already pulled
   run printf "STEP 2/3: RUN echo hello\n--> Using cache"
+  step5=$output
+  run printf "COPY --from=0 hello hello\n--> Cache pulled from remote"
+  step6=$output
+  run_buildah build $WITH_POLICY_JSON --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth --layers --cache-from localhost:${REGISTRY_PORT}/temp -t test -f ${mytmpdir}/Containerfile ${mytmpdir}
+  expect_output --substring "$step1"
+  expect_output --substring "$step2"
+  expect_output --substring "$step3"
+  expect_output --substring "$step4"
+  expect_output --substring "$step5"
+  expect_output --substring "$step6"
+
+  ##### Test when cache source is: localhost:${REGISTRY_PORT}/temp2
+
+  # clean all cache and intermediate images
+  # to make sure that we are only using cache
+  # from remote repo and not the local storage.
+  run_buildah rmi --all -f
+
+  # ------ Test case ------ #
+  # expect cache to be pushed on remote stream
+  # now a build on clean slate must pull cache
+  # from remote instead of actually computing the
+  # run steps
+  run printf "STEP 2/5: RUN echo hello\n--> Cache pulled from remote"
+  step1=$output
+  run printf "STEP 3/5: RUN echo world\n--> Cache pulled from remote"
+  step2=$output
+  run printf "STEP 4/5: RUN touch hello\n--> Cache pulled from remote"
+  step3=$output
+  run printf "STEP 5/5: ADD somefile somefile\n--> Cache pulled from remote"
+  step4=$output
+  # First run step in second stage should not be pulled since its already pulled
+  run printf "STEP 2/3: RUN echo hello\n--> Using cache"
+  step5=$output
+  run printf "COPY --from=0 hello hello\n--> Cache pulled from remote"
+  step6=$output
+  run_buildah build $WITH_POLICY_JSON --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth --layers --cache-from localhost:${REGISTRY_PORT}/temp2 -t test -f ${mytmpdir}/Containerfile ${mytmpdir}
+  expect_output --substring "$step1"
+  expect_output --substring "$step2"
+  expect_output --substring "$step3"
+  expect_output --substring "$step4"
+  expect_output --substring "$step5"
+  expect_output --substring "$step6"
+}
+
+@test "build test pushing and pulling from remote cache sources" {
+  _prefetch alpine
+  mytmpdir=${TEST_SCRATCH_DIR}/my-dir
+  mkdir -p ${mytmpdir}
+  echo something > ${mytmpdir}/somefile
+  cat > $mytmpdir/Containerfile << _EOF
+FROM alpine
+RUN echo hello
+RUN echo world
+RUN touch hello
+ADD somefile somefile
+
+FROM alpine
+RUN echo hello
+COPY --from=0 hello hello
+RUN --mount=type=cache,id=YfHI60aApFM-target,target=/target echo world > /target/hello
+_EOF
+
+  start_registry
+  run_buildah login --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth --username testuser --password testpassword localhost:${REGISTRY_PORT}
+
+  # ------ Test case ------ #
+  # prepare expected output beforehand
+  # must push cache twice i.e for first step and second step
+  run printf "STEP 2/5: RUN echo hello\nhello\n--> Pushing cache"
+  step1=$output
+  run printf "STEP 3/5: RUN echo world\nworld\n--> Pushing cache"
+  step2=$output
+  run printf "STEP 4/5: RUN touch hello\n--> Pushing cache"
+  step3=$output
+  run printf "STEP 5/5: ADD somefile somefile\n--> Pushing cache"
+  step4=$output
+  # First run step in second stage should not be pushed since its already pushed
+  run printf "STEP 2/4: RUN echo hello\n--> Using cache"
+  step5=$output
+  # Last step is `COPY --from=0 hello hello' so it must be committed and pushed
+  # actual output is `[2/2] STEP 3/3: COPY --from=0 hello hello\n[2/2] COMMIT test\n-->Pushing cache`
+  # but lets match smaller suffix
+  run printf "COMMIT test\n--> Pushing cache"
+  step6=$output
+
+  # actually run build
+  run_buildah build $WITH_POLICY_JSON --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth --layers --cache-to localhost:${REGISTRY_PORT}/temp -t test -f ${mytmpdir}/Containerfile ${mytmpdir}
+  expect_output --substring "$step1"
+  expect_output --substring "$step2"
+  expect_output --substring "$step3"
+  expect_output --substring "$step4"
+  expect_output --substring "$step5"
+  expect_output --substring "$step6"
+
+  # clean all cache and intermediate images
+  # to make sure that we are only using cache
+  # from remote repo and not the local storage.
+  run_buildah rmi --all -f
+
+  # ------ Test case ------ #
+  # expect cache to be pushed on remote stream
+  # now a build on clean slate must pull cache
+  # from remote instead of actually computing the
+  # run steps
+  run printf "STEP 2/5: RUN echo hello\n--> Cache pulled from remote"
+  step1=$output
+  run printf "STEP 3/5: RUN echo world\n--> Cache pulled from remote"
+  step2=$output
+  run printf "STEP 4/5: RUN touch hello\n--> Cache pulled from remote"
+  step3=$output
+  run printf "STEP 5/5: ADD somefile somefile\n--> Cache pulled from remote"
+  step4=$output
+  # First run step in second stage should not be pulled since its already pulled
+  run printf "STEP 2/4: RUN echo hello\n--> Using cache"
   step5=$output
   run printf "COPY --from=0 hello hello\n--> Cache pulled from remote"
   step6=$output
@@ -4449,7 +5637,6 @@ _EOF
   expect_output --substring "Pushing cache"
   # should not pull cache if its already in local storage
   assert "$output" !~ "Cache pulled"
-
 }
 
 @test "build test pushing and pulling from remote cache sources - after adding content summary" {
@@ -4523,6 +5710,48 @@ _EOF
   expect_output --substring "Pushing cache"
   # should not pull cache if its already in local storage
   assert "$output" !~ "Cache pulled"
+}
+
+@test "build test run mounting stage cached from remote cache source" {
+  _prefetch alpine
+
+  start_registry
+  run_buildah login --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth --username testuser --password testpassword localhost:${REGISTRY_PORT}
+
+  # ------ Test case ------ #
+  # prepare expected output beforehand
+  run printf "STEP 2/2: COPY / /\n--> Pushing cache"
+  step1_2=$output
+  run printf "COMMIT test\n--> Pushing cache"
+  step2_2=$output
+
+  # actually run build
+  run_buildah build $WITH_POLICY_JSON --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth --layers --cache-to localhost:${REGISTRY_PORT}/temp -t test -f $BUDFILES/cache-from-stage/Containerfile $BUDFILES/cache-from-stage
+  expect_output --substring "$step1_2"
+  #expect_output --substring "$step2_2"
+
+  # clean all cache and intermediate images
+  # to make sure that we are only using cache
+  # from remote repo and not the local storage.
+
+  # Important side-note: don't use `run_buildah rmi --all -f`
+  # since on podman-remote test this will remove prefetched alpine
+  # and it will try to pull alpine from docker.io with
+  # completely different digest (ruining our cache logic).
+  run_buildah rmi test
+
+  # ------ Test case ------ #
+  # expect cache to be pushed on remote stream
+  # now a build on clean slate must pull cache
+  # from remote instead of actually computing the
+  # run steps
+  run printf "STEP 2/2: COPY / /\n--> Using cache"
+  step1_2=$output
+  run printf "STEP 2/2: RUN --mount=type=bind,from=stage1,target=/mnt echo hi > test\n--> Cache pulled from remote"
+  step2_2=$output
+  run_buildah build $WITH_POLICY_JSON --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth --layers --cache-from localhost:${REGISTRY_PORT}/temp --cache-to localhost:${REGISTRY_PORT}/temp -t test -f $BUDFILES/cache-from-stage/Containerfile $BUDFILES/cache-from-stage
+  expect_output --substring "$step1_2"
+  expect_output --substring "$step2_2"
 
 }
 
@@ -4533,6 +5762,27 @@ _EOF
   cat > $mytmpdir/Containerfile << _EOF
 FROM alpine
 ARG SECRET="Itismysecret"
+ARG NEWSECRET
+RUN echo $SECRET
+RUN touch hello
+FROM alpine
+COPY --from=0 hello .
+RUN echo "$SECRET"
+_EOF
+
+  run_buildah build -t testbud $WITH_POLICY_JSON --file ${mytmpdir}/Containerfile .
+  assert "$output" !~ '--build-arg SECRET=<VALUE>'
+  expect_output --substring '\-\-build-arg NEWSECRET=<VALUE>'
+
+  run_buildah build -t testbud $WITH_POLICY_JSON --build-arg NEWSECRET="VerySecret" --file ${mytmpdir}/Containerfile .
+  assert "$output" !~ '--build-arg SECRET=<VALUE>'
+  assert "$output" !~ '--build-arg NEWSECRET=<VALUE>'
+
+# case should similarly honor globally declared args
+  cat > $mytmpdir/Containerfile << _EOF
+ARG SECRET="Itismysecret"
+FROM alpine
+ARG SECRET
 ARG NEWSECRET
 RUN echo $SECRET
 RUN touch hello
@@ -4611,15 +5861,19 @@ _EOF
 }
 _EOF
 
-    run_buildah build --runtime=crun --runtime-flag=debug --security-opt seccomp=${TEST_SCRATCH_DIR}/seccomp.json \
-                    -q -t alpine-bud-crun $WITH_POLICY_JSON --file ${mytmpdir}/Containerfile .
+    # crun caches seccomp profiles, so this test fails if run more than once.
+    # See https://github.com/containers/crun/issues/1475
+    cruntmp=${TEST_SCRATCH_DIR}/crun
+    mkdir $cruntmp
+    run_buildah build --runtime=crun --runtime-flag=debug --runtime-flag=root=$cruntmp \
+                --security-opt seccomp=${TEST_SCRATCH_DIR}/seccomp.json \
+                -q -t alpine-bud-crun $WITH_POLICY_JSON --file ${mytmpdir}/Containerfile .
     expect_output --substring "unknown seccomp syscall"
   fi
 
   if [ -z "${found_runtime}" ]; then
     die "Did not find 'runc' nor 'crun' in \$PATH - could not run this test!"
   fi
-
 }
 
 @test "bud - invalid runtime flags test" {
@@ -4642,6 +5896,27 @@ _EOF
 @test "bud - accept at most one arg" {
     run_buildah 125 build $WITH_POLICY_JSON $BUDFILES/dns extraarg
     assert "$output" =~ ".*accepts at most 1 arg\(s\), received 2" "Should fail when passed extra arg after context directory"
+}
+
+@test "bud with --no-hostname" {
+  skip_if_no_runtime
+
+  _prefetch alpine
+
+  run_buildah build --no-cache -t testbud \
+                  $WITH_POLICY_JSON $BUDFILES/no-hostname
+  assert "${lines[2]}" != "localhost" "Should be set to something other then localhost"
+
+  run_buildah build --no-hostname --no-cache -t testbud \
+                  $WITH_POLICY_JSON \
+		  $BUDFILES/no-hostname
+  assert "${lines[2]}" == "localhost" "Should be set to localhost"
+
+  run_buildah 1 build --network=none --no-hostname --no-cache -t testbud \
+                  $WITH_POLICY_JSON \
+		  -f $BUDFILES/no-hostname/Containerfile.noetc \
+		  $BUDFILES/no-hostname
+  assert "$output" =~ ".*ls: /etc: No such file or directory" "/etc/ directory should be gone"
 }
 
 @test "bud with --add-host" {
@@ -4857,9 +6132,9 @@ _EOF
 @test "bud with --pull-always" {
   _prefetch docker.io/library/alpine
   run_buildah build --pull-always $WITH_POLICY_JSON -t testpull $BUDFILES/containerfile
-  expect_output --from="${lines[1]}" "Trying to pull docker.io/library/alpine:latest..."
+  expect_output --substring "Trying to pull docker.io/library/alpine:latest..."
   run_buildah build --pull=always $WITH_POLICY_JSON -t testpull $BUDFILES/containerfile
-  expect_output --from="${lines[1]}" "Trying to pull docker.io/library/alpine:latest..."
+  expect_output --substring "Trying to pull docker.io/library/alpine:latest..."
 }
 
 @test "bud with --memory and --memory-swap" {
@@ -4937,6 +6212,14 @@ _EOF
   expect_output --substring 'building.*"COPY \*foo /testdir".*no such file or directory'
 }
 
+@test "bud with copy --exclude" {
+  run_buildah build -t test $WITH_POLICY_JSON $BUDFILES/copy-exclude
+  assert "$output" !~ "test1.txt"
+
+  run_buildah build -t test2 -f Containerfile.missing $WITH_POLICY_JSON $BUDFILES/copy-exclude
+  assert "$output" !~ "test2.txt"
+}
+
 @test "bud with containerfile secret" {
   _prefetch alpine
   mytmpdir=${TEST_SCRATCH_DIR}/my-dir1
@@ -4996,7 +6279,7 @@ _EOF
 SOMESECRETDATA
 _EOF
 
-  run_buildah bud --secret=id=mysecret,src=${mytmpdir}/mysecret $WITH_POLICY_JSON  -t secretmode -f $BUDFILES/run-mounts/Dockerfile.secret-mode $BUDFILES/run-mounts
+  run_buildah bud --secret=id=mysecret,src=${mytmpdir}/mysecret,type=file $WITH_POLICY_JSON  -t secretmode -f $BUDFILES/run-mounts/Dockerfile.secret-mode $BUDFILES/run-mounts
   expect_output --substring "400"
 }
 
@@ -5018,16 +6301,24 @@ _EOF
   _prefetch alpine
 
   run_buildah build $WITH_POLICY_JSON  -t secretnotreq -f $BUDFILES/run-mounts/Dockerfile.secret-not-required $BUDFILES/run-mounts
+  run_buildah 1 build $WITH_POLICY_JSON  -t secretnotreq -f $BUDFILES/run-mounts/Dockerfile.secret-required-false $BUDFILES/run-mounts
+  expect_output --substring "No such file or directory"
+  assert "$output" !~ "secret required but no secret with id mysecret found"
 }
 
 @test "bud with containerfile secret required" {
   _prefetch alpine
 
   run_buildah 125 build $WITH_POLICY_JSON  -t secretreq -f $BUDFILES/run-mounts/Dockerfile.secret-required $BUDFILES/run-mounts
-  expect_output --substring "secret required but no secret with id mysecret found"
+  expect_output --substring 'secret required but no secret with id "mysecret" found'
+
+  # Also test secret required without value
+  run_buildah 125 build $WITH_POLICY_JSON  -t secretreq -f $BUDFILES/run-mounts/Dockerfile.secret-required-wo-value $BUDFILES/run-mounts
+  expect_output --substring 'secret required but no secret with id "mysecret" found'
 }
 
 @test "bud with containerfile env secret" {
+  _prefetch alpine
   export MYSECRET=SOMESECRETDATA
   run_buildah build --secret=id=mysecret,src=MYSECRET,type=env $WITH_POLICY_JSON  -t secretimg -f $BUDFILES/run-mounts/Dockerfile.secret $BUDFILES/run-mounts
   expect_output --substring "SOMESECRETDATA"
@@ -5043,6 +6334,10 @@ _EOF
   run_buildah from secretimg
   run_buildah 1 run secretimg-working-container cat /run/secrets/mysecret
   expect_output --substring "cat: can't open '/run/secrets/mysecret': No such file or directory"
+
+  run_buildah 125 build --secret=id=mysecret2,env=MYSECRET,true=false $WITH_POLICY_JSON -f $BUDFILES/run-mounts/Dockerfile.secret $BUDFILES/run-mounts
+  expect_output --substring "incorrect secret flag format"
+
   run_buildah rm -a
 }
 
@@ -5060,6 +6355,7 @@ _EOF
 }
 
 @test "bud-multiple-platform-values" {
+  skip "FIXME: #4396 - this test is broken, and is failing gating tests"
   outputlist=testlist
   # check if we can run a couple of 32-bit versions of an image, and if we can,
   # assume that emulation for other architectures is in place.
@@ -5126,12 +6422,8 @@ _EOF
 
 @test "bud-multiple-platform-no-run" {
   outputlist=localhost/testlist
-  # Note: [This is a bug] jobs=1 is intentionally set here since --jobs=0 sets
-  # concurrency to maximum which uncovers all sorts of race condition causing
-  # flakes in CI. Please put this back to --jobs=0 when https://github.com/containers/buildah/issues/3710
-  # is resolved.
   run_buildah build $WITH_POLICY_JSON \
-              --jobs=1 \
+              --jobs=0 \
               --all-platforms \
               --manifest $outputlist \
               --build-arg SAFEIMAGE=$SAFEIMAGE \
@@ -5182,6 +6474,18 @@ _EOF
   assert "$manifests" = "amd64 arm64 ppc64le s390x" "arch list in manifest"
 }
 
+@test "bud-targetplatform-as-build-arg" {
+  outputlist=localhost/testlist
+  for targetplatform in linux/arm64 linux/amd64 ; do
+    run_buildah build $WITH_POLICY_JSON \
+              --build-arg SAFEIMAGE=$SAFEIMAGE \
+              --build-arg TARGETPLATFORM=$targetplatform \
+              -f $BUDFILES/multiarch/Dockerfile.built-in-args \
+              $BUDFILES/multiarch
+    expect_output --substring "I'm compiling for $targetplatform"
+  done
+}
+
 # * Performs multi-stage build with label1=value1 and verifies
 # * Relabels build with label1=value2 and verifies
 # * Rebuild with label1=value1 and makes sure everything is used from cache
@@ -5219,11 +6523,9 @@ _EOF
   # Rebuild everything with label1=value1 and everything should be cached from first image
   run_buildah build --layers --label "label1=value1" $WITH_POLICY_JSON -t ${target} -f $BUDFILES/multi-stage-builds/Dockerfile.reused $BUDFILES/multi-stage-builds
 
-  # Enitre image must be picked from cache
+  # Entire image must be picked from cache
   run_buildah inspect --format '{{ .FromImageID }}' ${target}
   expect_output "$firstImageID" "Image ID cached from first build"
-
-  run_buildah rmi -f ${target}
 }
 
 
@@ -5255,13 +6557,12 @@ _EOF
   # Label of second build must contain label1:value2
   run_buildah inspect --format '{{ .Docker.ContainerConfig.Labels }}' ${target}
   expect_output --substring "label1:value2"
-
-  run_buildah rmi -f ${target}
 }
 
 @test "bud with run should not leave mounts behind cleanup test" {
   skip_if_in_container
   skip_if_no_podman
+  _prefetch alpine
 
   # Create target dir where we will export tar
   target=cleanable
@@ -5286,6 +6587,7 @@ _EOF
 @test "bud with custom files in /run/ should persist cleanup test" {
   skip_if_in_container
   skip_if_no_podman
+  _prefetch alpine
 
   # Create target dir where we will export tar
   target=cleanable
@@ -5310,26 +6612,26 @@ _EOF
 @test "bud-with-mount-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
-  local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount
-  cp -R $BUDFILES/buildkit-mount $contextdir
+  _prefetch alpine
+  local contextdir=$BUDFILES/buildkit-mount
   run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfile $contextdir/
   expect_output --substring "hello"
-  run_buildah rmi -f testbud
 }
 
 @test "bud-with-mount-no-source-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount
   cp -R $BUDFILES/buildkit-mount $contextdir
   run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfile2 $contextdir/
   expect_output --substring "hello"
-  run_buildah rmi -f testbud
 }
 
 @test "bud-with-mount-with-only-target-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount
   cp -R $BUDFILES/buildkit-mount $contextdir
   run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfile6 $contextdir/
@@ -5339,79 +6641,107 @@ _EOF
 @test "bud-with-mount-no-subdir-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount
   cp -R $BUDFILES/buildkit-mount $contextdir
   run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfile $contextdir/subdir/
   expect_output --substring "hello"
-  run_buildah rmi -f testbud
 }
 
 @test "bud-with-mount-relative-path-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount
   cp -R $BUDFILES/buildkit-mount $contextdir
   run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfile4 $contextdir/
   expect_output --substring "hello"
-  run_buildah rmi -f testbud
 }
 
 @test "bud-with-mount-with-rw-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount
   cp -R $BUDFILES/buildkit-mount $contextdir
   run_buildah build --isolation chroot -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfile3 $contextdir/subdir/
   expect_output --substring "world"
-  run_buildah rmi -f testbud
+}
+
+@test "bud-verify-if-we-dont-clean-preexisting-path" {
+  skip_if_no_runtime
+  skip_if_in_container
+  _prefetch alpine ubuntu
+  run_buildah 1 build -t testbud $WITH_POLICY_JSON --secret id=secret-foo,src=$BUDFILES/verify-cleanup/secret1.txt -f $BUDFILES/verify-cleanup/Dockerfile $BUDFILES/verify-cleanup/
+  expect_output --substring "hello"
+  expect_output --substring "secrettext"
+  expect_output --substring "Directory /tmp exists."
+  expect_output --substring "Directory /var/tmp exists."
+  expect_output --substring "Directory /testdir DOES NOT exists."
+  expect_output --substring "Cache Directory /cachedir DOES NOT exists."
+  expect_output --substring "Secret File secret1.txt DOES NOT exists."
+  expect_output --substring "/tmp/hey: No such file or directory"
 }
 
 @test "bud-with-mount-with-tmpfs-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount
   cp -R $BUDFILES/buildkit-mount $contextdir
   # tmpfs mount: target should be available on container without creating any special directory on container
   run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfiletmpfs
-  run_buildah rmi -f testbud
 }
 
 @test "bud-with-mount-with-tmpfs-with-copyup-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount
   cp -R $BUDFILES/buildkit-mount $contextdir
   run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfiletmpfscopyup
   expect_output --substring "certs"
-  run_buildah rmi -f testbud
 }
 
 @test "bud-with-mount-cache-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
+  local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount
+  cp -R $BUDFILES/buildkit-mount $contextdir
+  # Use a private TMPDIR so type=cache tests can run in parallel
+  # try writing something to persistent cache
+  TMPDIR=${TEST_SCRATCH_DIR} run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilecachewrite
+  # try reading something from persistent cache in a different build
+  TMPDIR=${TEST_SCRATCH_DIR} run_buildah build -t testbud2 $WITH_POLICY_JSON -f $contextdir/Dockerfilecacheread
+  expect_output --substring "hello"
+}
+
+@test "bud-with-mount-cache-like-buildkit with buildah prune should clear the cache" {
+  skip_if_no_runtime
+  skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount
   cp -R $BUDFILES/buildkit-mount $contextdir
   # try writing something to persistent cache
-  run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilecachewrite
+  TMPDIR=${TEST_SCRATCH_DIR} run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilecachewrite
+  # prune the mount cache
+  TMPDIR=${TEST_SCRATCH_DIR} run_buildah prune
   # try reading something from persistent cache in a different build
-  run_buildah build -t testbud2 $WITH_POLICY_JSON -f $contextdir/Dockerfilecacheread
-  expect_output --substring "hello"
-  run_buildah rmi -f testbud
-  run_buildah rmi -f testbud2
+  TMPDIR=${TEST_SCRATCH_DIR} run_buildah 1 build -t testbud2 $WITH_POLICY_JSON -f $contextdir/Dockerfilecacheread
+  expect_output --substring "No such file or directory"
 }
 
 @test "bud-with-mount-cache-like-buildkit-verify-default-selinux-option" {
   skip_if_no_runtime
   skip_if_in_container
-  local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount2
-  cp -R $BUDFILES/buildkit-mount $contextdir
   _prefetch alpine
   # try writing something to persistent cache
-  run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilecachewritewithoutz
+  TMPDIR=${TEST_SCRATCH_DIR} run_buildah build -t testbud $WITH_POLICY_JSON -f $BUDFILES/buildkit-mount/Dockerfilecachewritewithoutz
   # try reading something from persistent cache in a different build
-  run_buildah build -t testbud2 $WITH_POLICY_JSON -f $contextdir/Dockerfilecachereadwithoutz
-  buildah_cache_dir="$TMPDIR/buildah-cache-$UID"
-  # buildah cache parent must exist for uid specific to this invocation
+  TMPDIR=${TEST_SCRATCH_DIR} run_buildah build -t testbud2 $WITH_POLICY_JSON -f $BUDFILES/buildkit-mount/Dockerfilecachereadwithoutz
+  buildah_cache_dir="${TEST_SCRATCH_DIR}/buildah-cache-$UID"
+  # buildah cache parent must have been created for our uid specific to this test
   test -d "$buildah_cache_dir"
   expect_output --substring "hello"
 }
@@ -5420,12 +6750,22 @@ _EOF
   # Note: this test is just testing syntax for sharing, actual behaviour test needs parallel build in order to test locking.
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount
   cp -R $BUDFILES/buildkit-mount $contextdir
   # try writing something to persistent cache
-  run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilecachewritesharing
+  TMPDIR=${TEST_SCRATCH_DIR} run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilecachewritesharing
   expect_output --substring "world"
-  run_buildah rmi -f testbud
+}
+
+@test "bud-with-multiple-mount-keeps-default-bind-mount" {
+  skip_if_no_runtime
+  skip_if_in_container
+  _prefetch alpine
+  local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount
+  cp -R $BUDFILES/buildkit-mount $contextdir
+  run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilemultiplemounts $contextdir/
+  expect_output --substring "hello"
 }
 
 @test "bud with user in groups" {
@@ -5456,6 +6796,7 @@ _EOF
 @test "bud-with-mount-bind-from-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount-from
   cp -R $BUDFILES/buildkit-mount-from $contextdir
   # build base image which we will use as our `from`
@@ -5463,13 +6804,12 @@ _EOF
   # try reading something from another image in a different build
   run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilebindfrom
   expect_output --substring "hello"
-  run_buildah rmi -f buildkitbase
-  run_buildah rmi -f testbud
 }
 
 @test "bud-with-writeable-mount-bind-from-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount-from
   cp -R $BUDFILES/buildkit-mount-from $contextdir
   # build base image which we will use as our `from`
@@ -5477,13 +6817,12 @@ _EOF
   # try reading something from another image in a different build
   run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilebindfromwriteable
   expect_output --substring "world"
-  run_buildah rmi -f buildkitbase
-  run_buildah rmi -f testbud
 }
 
 @test "bud-with-mount-bind-from-without-source-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount-from
   cp -R $BUDFILES/buildkit-mount-from $contextdir
   # build base image which we will use as our `from`
@@ -5491,13 +6830,12 @@ _EOF
   # try reading something from another image in a different build
   run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilebindfromwithoutsource
   expect_output --substring "hello"
-  run_buildah rmi -f buildkitbase
-  run_buildah rmi -f testbud
 }
 
 @test "bud-with-mount-bind-from-with-empty-from-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount-from
   cp -R $BUDFILES/buildkit-mount-from $contextdir
   # build base image which we will use as our `from`
@@ -5505,51 +6843,48 @@ _EOF
   # try reading something from image in a different build
   run_buildah 125 build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilebindfromwithemptyfrom
   expect_output --substring "points to an empty value"
-  run_buildah rmi -f buildkitbase
 }
 
 @test "bud-with-mount-cache-from-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount-from
   cp -R $BUDFILES/buildkit-mount-from $contextdir
   # try reading something from persistent cache in a different build
-  run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilecachefrom $contextdir/
+  TMPDIR=${TEST_SCRATCH_DIR} run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilecachefrom $contextdir/
   expect_output --substring "hello"
-  run_buildah rmi -f testbud
 }
 
-# following test must fail
 @test "bud-with-mount-cache-image-from-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
-  local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount-from
-  cp -R $BUDFILES/buildkit-mount-from $contextdir
+  _prefetch alpine
+  local contextdir=${BUDFILES}/buildkit-mount-from
 
   # build base image which we will use as our `from`
-  run_buildah build -t buildkitbase $WITH_POLICY_JSON -f $contextdir/Dockerfilebuildkitbase $contextdir/
+  TMPDIR=${TEST_SCRATCH_DIR} run_buildah build -t buildkitbase $WITH_POLICY_JSON -f $contextdir/Dockerfilebuildkitbase $contextdir/
 
   # try reading something from persistent cache in a different build
-  run_buildah 125 build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilecachefromimage
-  expect_output --substring "no stage found with name buildkitbase"
-  run_buildah rmi -f buildkitbase
+  TMPDIR=${TEST_SCRATCH_DIR} run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilecachefromimage
 }
 
 @test "bud-with-mount-cache-multiple-from-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount-from
   cp -R $BUDFILES/buildkit-mount-from $contextdir
   # try reading something from persistent cache in a different build
-  run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilecachemultiplefrom $contextdir/
+  TMPDIR=${TEST_SCRATCH_DIR} run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilecachemultiplefrom $contextdir/
   expect_output --substring "hello"
   expect_output --substring "hello2"
-  run_buildah rmi -f testbud
 }
 
 @test "bud-with-mount-bind-from-relative-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount-from
   cp -R $BUDFILES/buildkit-mount-from $contextdir
   # build base image which we will use as our `from`
@@ -5557,8 +6892,6 @@ _EOF
   # try reading something from image in a different build
   run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilebindfromrelative
   expect_output --substring "hello"
-  run_buildah rmi -f buildkitbaserelative
-  run_buildah rmi -f testbud
 }
 
 @test "bud-with-mount-bind-from-multistage-relative-like-buildkit" {
@@ -5566,22 +6899,22 @@ _EOF
   cp -R $BUDFILES/buildkit-mount-from $contextdir
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   # build base image which we will use as our `from`
   run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilemultistagefrom $contextdir/
   expect_output --substring "hello"
-  run_buildah rmi -f testbud
 }
 
 @test "bud-with-mount-bind-from-cache-multistage-relative-like-buildkit" {
   skip_if_no_runtime
   skip_if_in_container
+  _prefetch alpine
   local contextdir=${TEST_SCRATCH_DIR}/buildkit-mount-from
   cp -R $BUDFILES/buildkit-mount-from $contextdir
   # build base image which we will use as our `from`
   run_buildah build -t testbud $WITH_POLICY_JSON -f $contextdir/Dockerfilemultistagefromcache $contextdir/
   expect_output --substring "hello"
   expect_output --substring "hello2"
-  run_buildah rmi -f testbud
 }
 
 @test "bud with network names" {
@@ -5601,6 +6934,42 @@ _EOF
   fi
 }
 
+@test "bud with --network slirp4netns" {
+  skip_if_no_runtime
+  skip_if_in_container
+  skip_if_chroot
+
+  _prefetch alpine
+
+  run_buildah bud $WITH_POLICY_JSON --network slirp4netns $BUDFILES/network
+  # default subnet is 10.0.2.100/24
+  assert "$output" =~ "10.0.2.100/24" "ip addr shows default subnet"
+
+  run_buildah bud $WITH_POLICY_JSON --network slirp4netns:cidr=192.168.255.0/24,mtu=2000 $BUDFILES/network
+  assert "$output" =~ "192.168.255.100/24" "ip addr shows custom subnet"
+  assert "$output" =~ "mtu 2000" "ip addr shows mtu 2000"
+}
+
+@test "bud with --network pasta" {
+  skip_if_no_runtime
+  skip_if_chroot
+  skip_if_root_environment "pasta only works rootless"
+
+  _prefetch alpine
+
+  # pasta by default copies the host ip
+  ip=$(hostname -I | cut -f 1 -d " ")
+
+  run_buildah bud $WITH_POLICY_JSON --network pasta $BUDFILES/network
+  assert "$output" =~ "$ip" "ip addr shows default subnet"
+
+  # check some entwork options, it accepts raw pasta(1) areguments
+  mac="9a:dd:31:ea:92:98"
+  run_buildah bud $WITH_POLICY_JSON --network pasta:--mtu,2000,--ns-mac-addr,"$mac" $BUDFILES/network
+  assert "$output" =~ "$mac" "ip addr shows custom mac address"
+  assert "$output" =~ "mtu 2000" "ip addr shows mtu 2000"
+}
+
 @test "bud WORKDIR owned by USER" {
   _prefetch alpine
   target=alpine-image
@@ -5609,7 +6978,7 @@ _EOF
   expect_output --substring "1000:1000 /home/http/public"
 }
 
-@test "build interruption" {
+function build_signalled {
   skip_if_no_runtime
 
   _prefetch alpine
@@ -5625,13 +6994,25 @@ _EOF
   echo cat is pid ${cat_pid}
   # kill the buildah process early
   sleep 30
-  kill -s SIGINT "${buildah_pid}"
+  kill -s ${1} "${buildah_pid}"
   # wait for output to stop getting written from anywhere
   wait "${buildah_pid}" "${cat_pid}"
   echo log:
   cat ${TEST_SCRATCH_DIR}/log
   echo checking:
   ! grep 'not fully killed' ${TEST_SCRATCH_DIR}/log
+}
+
+@test "build interrupted" {
+  build_signalled SIGINT
+}
+
+@test "build terminated" {
+  build_signalled SIGTERM
+}
+
+@test "build killed" {
+  build_signalled SIGKILL
 }
 
 @test "build-multiple-parse" {
@@ -5644,15 +7025,30 @@ _EOF
 
 @test "build-with-network-test" {
   skip_if_in_container # Test only works in OCI isolation, which doesn't work in CI/CD systems. Buildah defaults to chroot isolation
-  _prefetch alpine
-  cat > ${TEST_SCRATCH_DIR}/Containerfile << _EOF
-FROM alpine
-RUN ping -c 1 4.2.2.2
-_EOF
-  run_buildah build $WITH_POLICY_JSON ${TEST_SCRATCH_DIR}
 
-  run_buildah 1 build --network=none $WITH_POLICY_JSON ${TEST_SCRATCH_DIR}
-  expect_output --substring "Network unreachable"
+  image="quay.io/libpod/alpine_nginx:latest"
+  _prefetch $image
+  cat > ${TEST_SCRATCH_DIR}/Containerfile << _EOF
+FROM $image
+RUN curl -k -o /dev/null http://www.redhat.com:80
+_EOF
+
+  # curl results show success
+  run_buildah build ${WITH_POLICY_JSON} ${TEST_SCRATCH_DIR}
+
+  # A proper test would use ping or nc, and check for ENETUNREACH.
+  # But in a tightly firewalled environment, even the expected-success
+  # test will fail. A not-quite-equivalent workaround is to use curl
+  # and hope that $http_proxy is set; we then rely on curl to fail
+  # in a slightly different way
+  expect_rc=6
+  expect_err="Could not resolve host: www.redhat.com"
+  if [[ $http_proxy != "" ]]; then
+    expect_rc=5
+    expect_err="Could not resolve proxy:"
+  fi
+  run_buildah $expect_rc build --network=none ${WITH_POLICY_JSON} ${TEST_SCRATCH_DIR}
+  expect_output --substring "$expect_err"
 }
 
 @test "build-with-no-new-privileges-test" {
@@ -5664,4 +7060,283 @@ _EOF
 
   run_buildah build --security-opt no-new-privileges $WITH_POLICY_JSON ${TEST_SCRATCH_DIR}
   expect_output --substring "NoNewPrivs:.*1"
+}
+
+@test "build --group-add" {
+  skip_if_no_runtime
+  id=$RANDOM
+
+  _prefetch alpine
+  cat > ${TEST_SCRATCH_DIR}/Containerfile << _EOF
+FROM alpine
+RUN id -G
+_EOF
+
+  run_buildah build --group-add $id $WITH_POLICY_JSON ${TEST_SCRATCH_DIR}
+  expect_output --substring "$id"
+
+  if is_rootless && has_supplemental_groups; then
+     run_buildah build --group-add keep-groups $WITH_POLICY_JSON ${TEST_SCRATCH_DIR}
+     expect_output --substring "65534"
+  fi
+}
+
+@test "build-env-precedence" {
+  skip_if_no_runtime
+
+  _prefetch alpine
+
+  run_buildah build --no-cache --env E=F --env G=H --env I=J --env K=L -f ${BUDFILES}/env/Dockerfile.env-precedence ${BUDFILES}/env
+  expect_output --substring "a=b c=d E=F G=H"
+  expect_output --substring "a=b c=d E=E G=G"
+  expect_output --substring "w=x y=z I=J K=L"
+  expect_output --substring "w=x y=z I=I K=K"
+
+  run_buildah build --no-cache --layers --env E=F --env G=H --env I=J --env K=L -f ${BUDFILES}/env/Dockerfile.env-precedence ${BUDFILES}/env
+  expect_output --substring "a=b c=d E=F G=H"
+  expect_output --substring "a=b c=d E=E G=G"
+  expect_output --substring "w=x y=z I=J K=L"
+  expect_output --substring "w=x y=z I=I K=K"
+}
+
+@test "build prints 12-digit hash" {
+  run_buildah build -t test -f $BUDFILES/containerfile/Containerfile .
+  regex='--> [0-9a-zA-Z]{12}'
+  if ! [[ $output =~ $regex ]]; then
+    false
+  fi
+}
+
+@test "build with name path changes" {
+  _prefetch busybox
+  run_buildah build --no-cache --quiet --pull=false $WITH_POLICY_JSON -t foo/bar $BUDFILES/commit/name-path-changes/
+  run_buildah build --no-cache --quiet --pull=false $WITH_POLICY_JSON -t bar $BUDFILES/commit/name-path-changes/
+  run_buildah images
+  expect_output --substring "localhost/foo/bar"
+  expect_output --substring "localhost/bar"
+}
+
+@test "build test default ulimits" {
+  skip_if_no_runtime
+  skip "FIXME: we cannot rely on podman-run ulimits matching buildah-bud (see #5820)"
+  _prefetch alpine
+
+  run podman --events-backend=none run --rm alpine sh -c "echo -n Files=; awk '/open files/{print \$4 \"/\" \$5}' /proc/self/limits"
+  podman_files=$output
+
+  run podman --events-backend=none run --rm alpine sh -c "echo -n Processes=; awk '/processes/{print \$3 \"/\" \$4}' /proc/self/limits"
+  podman_processes=$output
+
+  CONTAINERS_CONF=/dev/null run_buildah build --no-cache --pull=false $WITH_POLICY_JSON -t foo/bar $BUDFILES/bud.limits
+  expect_output --substring "$podman_files"
+  expect_output --substring "$podman_processes"
+}
+
+@test "build no write file on host - CVE-2024-1753" {
+  _prefetch alpine
+  cat > ${TEST_SCRATCH_DIR}/Containerfile << _EOF
+FROM alpine as base
+
+RUN ln -s / /rootdir
+
+FROM alpine
+
+# With exploit show host root, not the container's root, and create /BIND_BREAKOUT in / on the host
+RUN --mount=type=bind,from=base,source=/rootdir,destination=/exploit,rw ls -l /exploit; touch /exploit/BIND_BREAKOUT; ls -l /exploit
+
+_EOF
+
+  run_buildah build $WITH_POLICY_JSON ${TEST_SCRATCH_DIR}
+  expect_output --substring "/BIND_BREAKOUT"
+
+  run ls /BIND_BREAKOUT
+  rm -f /BIND_BREAKOUT
+  assert "$status" -eq 2 "exit code from ls"
+  expect_output --substring "No such file or directory"
+}
+
+@test "pull policy" {
+  echo FROM busybox > ${TEST_SCRATCH_DIR}/Containerfile
+  arch=amd64
+  if test $(arch) = x86_64 ; then
+    arch=arm64
+  fi
+  # specifying the arch should trigger "just pull it anyway" in containers/common
+  run_buildah build --pull=missing --arch $arch --iidfile ${TEST_SCRATCH_DIR}/image1.txt ${TEST_SCRATCH_DIR}
+  # not specifying the arch should trigger "yeah, fine, whatever we already have is fine" in containers/common
+  run_buildah build --pull=missing --iidfile ${TEST_SCRATCH_DIR}/image2.txt ${TEST_SCRATCH_DIR}
+  # both of these should have just been the base image's ID, which shouldn't have changed the second time around
+  cmp ${TEST_SCRATCH_DIR}/image1.txt ${TEST_SCRATCH_DIR}/image2.txt
+}
+
+# Verify: https://github.com/containers/buildah/issues/5185
+@test "build-test --mount=type=secret test from env with chroot isolation" {
+  skip_if_root_environment "Need to not be root for this test to work"
+  local contextdir=$BUDFILES/secret-env
+  export MYSECRET=SOMESECRETDATA
+  run_buildah build $WITH_POLICY_JSON --no-cache --isolation chroot --secret id=MYSECRET -t test -f $contextdir/Dockerfile
+  expect_output --substring "SOMESECRETDATA"
+}
+
+@test "build-logs-from-platform" {
+  run_buildah info --format '{{.host.os}}/{{.host.arch}}{{if .host.variant}}/{{.host.variant}}{{ end }}'
+  local platform="$output"
+  echo FROM --platform=$platform busybox > ${TEST_SCRATCH_DIR}/Containerfile
+  run_buildah build ${TEST_SCRATCH_DIR}
+  expect_output --substring "\-\-platform=$platform"
+}
+
+@test "build add https retry ca" {
+  createrandom ${TEST_SCRATCH_DIR}/randomfile
+  mkdir -p ${TEST_SCRATCH_DIR}/private
+  starthttpd ${TEST_SCRATCH_DIR} "" ${TEST_SCRATCH_DIR}/localhost.crt ${TEST_SCRATCH_DIR}/private/localhost.key
+  echo FROM scratch | tee ${TEST_SCRATCH_DIR}/Dockerfile
+  echo ADD "https://localhost:${HTTP_SERVER_PORT}/randomfile" / | tee -a ${TEST_SCRATCH_DIR}/Dockerfile
+  run_buildah build --retry-delay=0.142857s --retry=14 --cert-dir ${TEST_SCRATCH_DIR} ${TEST_SCRATCH_DIR}
+  run_buildah build --retry-delay=0.142857s --retry=14 --tls-verify=false $cid ${TEST_SCRATCH_DIR}
+  run_buildah 125 build --retry-delay=0.142857s --retry=14 $cid ${TEST_SCRATCH_DIR}
+  assert "$output" =~ "x509: certificate signed by unknown authority"
+  stophttpd
+  run_buildah 125 build --retry-delay=0.142857s --retry=14 --cert-dir ${TEST_SCRATCH_DIR} $cid ${TEST_SCRATCH_DIR}
+  assert "$output" =~ "retrying in 142.*ms .*14/14.*"
+}
+
+@test "bud with ADD with git repository source" {
+  _prefetch alpine
+
+  local contextdir=${TEST_SCRATCH_DIR}/add-git
+  mkdir -p $contextdir
+  cat > $contextdir/Dockerfile << _EOF
+FROM alpine
+RUN apk add git
+
+ADD https://github.com/containers/podman.git#v5.0 /podman-branch
+ADD https://github.com/containers/podman.git#v5.0.0 /podman-tag
+_EOF
+
+  run_buildah build -f $contextdir/Dockerfile -t git-image $contextdir
+  run_buildah from --quiet $WITH_POLICY_JSON --name testctr git-image
+
+  run_buildah run testctr -- sh -c 'cd podman-branch && git rev-parse HEAD'
+  local_head_hash=$output
+  run_buildah run testctr -- sh -c 'cd podman-branch && git ls-remote origin v5.0 | cut -f1'
+  assert "$output" = "$local_head_hash"
+
+  run_buildah run testctr -- sh -c 'cd podman-tag && git rev-parse HEAD'
+  local_head_hash=$output
+  run_buildah run testctr -- sh -c 'cd podman-tag && git ls-remote --tags origin v5.0.0^{} | cut -f1'
+  assert "$output" = "$local_head_hash"
+}
+
+@test "build-validates-bind-bind-propagation" {
+  _prefetch alpine
+
+  cat > ${TEST_SCRATCH_DIR}/Containerfile << _EOF
+FROM alpine as base
+FROM alpine
+RUN --mount=type=bind,from=base,source=/,destination=/var/empty,rw,bind-propagation=suid pwd
+_EOF
+
+  run_buildah 125 build $WITH_POLICY_JSON ${TEST_SCRATCH_DIR}
+  expect_output --substring "invalid mount option"
+}
+
+@test "build-validates-cache-bind-propagation" {
+  _prefetch alpine
+
+  cat > ${TEST_SCRATCH_DIR}/Containerfile << _EOF
+FROM alpine
+RUN --mount=type=cache,destination=/var/empty,rw,bind-propagation=suid pwd
+_EOF
+
+  run_buildah 125 build $WITH_POLICY_JSON ${TEST_SCRATCH_DIR}
+  expect_output --substring "invalid mount option"
+}
+
+@test "build-check-cve-2024-9675" {
+  _prefetch alpine
+
+  touch ${TEST_SCRATCH_DIR}/file.txt
+
+  cat > ${TEST_SCRATCH_DIR}/Containerfile <<EOF
+FROM alpine
+RUN --mount=type=cache,id=../../../../../../../../../../../$TEST_SCRATCH_DIR,target=/var/tmp \
+ls -l /var/tmp && cat /var/tmp/file.txt
+EOF
+
+  run_buildah 1 build --no-cache ${TEST_SCRATCH_DIR}
+  expect_output --substring "cat: can't open '/var/tmp/file.txt': No such file or directory"
+
+  cat > ${TEST_SCRATCH_DIR}/Containerfile <<EOF
+FROM alpine
+RUN --mount=type=cache,source=../../../../../../../../../../../$TEST_SCRATCH_DIR,target=/var/tmp \
+ls -l /var/tmp && cat /var/tmp/file.txt
+EOF
+
+  run_buildah 125 build --no-cache ${TEST_SCRATCH_DIR}
+  expect_output --substring "no such file or directory"
+
+  mkdir ${TEST_SCRATCH_DIR}/cve20249675
+  cat > ${TEST_SCRATCH_DIR}/cve20249675/Containerfile <<EOF
+FROM alpine
+RUN --mount=type=cache,from=testbuild,source=../,target=/var/tmp \
+ls -l /var/tmp && cat /var/tmp/file.txt
+EOF
+
+  mkdir ${TEST_SCRATCH_DIR}/cachedir
+
+  run_buildah 1 build --security-opt label=disable --build-context testbuild=${TEST_SCRATCH_DIR}/cachedir/ --no-cache ${TEST_SCRATCH_DIR}/cve20249675/
+  expect_output --substring "cat: can't open '/var/tmp/file.txt': No such file or directory"
+}
+
+@test "build-mounts-implicit-workdir" {
+  base=busybox
+  _prefetch $base
+  run_buildah inspect --format '{{.Docker.Config.WorkingDir}}' --type=image $base
+  expect_output "" "test base image needs to not have a default working directory defined in its configuration"
+  # check that the target for a bind mount can be specified as a relative path even when there's no WorkingDir defined for it to be relative to
+  echo FROM $base > ${TEST_SCRATCH_DIR}/Containerfile
+  echo RUN --mount=type=bind,src=Containerfile,target=Containerfile test -s Containerfile >> ${TEST_SCRATCH_DIR}/Containerfile
+  echo RUN --mount=type=cache,id=cash,target=cachesubdir truncate -s 1024 cachesubdir/cachefile >> ${TEST_SCRATCH_DIR}/Containerfile
+  echo RUN --mount=type=cache,id=cash,target=cachesubdir2 test -s cachesubdir2/cachefile >> ${TEST_SCRATCH_DIR}/Containerfile
+  echo RUN --mount=type=tmpfs,target=tmpfssubdir test '`stat -f -c %i .`' '!=' '`stat -f -c %i tmpfssubdir`' >> ${TEST_SCRATCH_DIR}/Containerfile
+  run_buildah build --security-opt label=disable ${TEST_SCRATCH_DIR}
+}
+
+@test "build-security-opt-mask" {
+  base=busybox
+  _prefetch $base
+  run_buildah build bud/masks
+  expect_output --substring "masked" "Everything should be masked"
+  run_buildah build --security-opt unmask=all bud/masks
+  expect_output --substring "unmasked" "Everything should be masked"
+  run_buildah build --security-opt unmask=/proc/* bud/masks
+  expect_output --substring "unmasked" "Everything should be masked"
+  run_buildah build --security-opt unmask=/proc/acpi bud/masks
+  expect_output --substring "unmasked" "Everything should be masked"
+}
+
+@test "build-mounts-build-context-rw" {
+  zflag=
+  if which selinuxenabled > /dev/null 2> /dev/null ; then
+    if selinuxenabled ; then
+      zflag=,z
+    fi
+  fi
+  base=busybox
+  _prefetch $base
+  mkdir -p ${TEST_SCRATCH_DIR}/buildcontext
+  cat > ${TEST_SCRATCH_DIR}/buildcontext/Dockerfile << EOF
+  FROM $base
+  RUN --mount=type=bind,dst=/dst,source=/,rw${zflag} \
+    mkdir /dst/subdir ; \
+    chown 1000:1000 /dst/subdir ; \
+    chmod 777 /dst/subdir ; \
+    touch /dst/subdir/file-suid ; \
+    chmod 4777 /dst/subdir/file-suid
+EOF
+  run_buildah build ${TEST_SCRATCH_DIR}/buildcontext
+  run find ${TEST_SCRATCH_DIR}/buildcontext -name file-suid -ls
+  find ${TEST_SCRATCH_DIR}/buildcontext -ls
+  expect_output "" "build should not be able to write to build context"
 }

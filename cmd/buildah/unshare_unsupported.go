@@ -1,4 +1,4 @@
-// +build !linux
+//go:build !linux
 
 package main
 
@@ -15,4 +15,7 @@ func init() {
 		},
 	}
 	rootCmd.AddCommand(&unshareCommand)
+}
+
+func debugCapabilities() {
 }
