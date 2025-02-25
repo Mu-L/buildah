@@ -17,7 +17,7 @@ Multiple transports are supported:
   An existing local directory _path_ containing the manifest, layer tarballs, and signatures in individual files. This is a non-standardized format, primarily useful for debugging or noninvasive image inspection.
 
   **docker://**_docker-reference_ (Default)
-  An image in a registry implementing the "Docker Registry HTTP API V2". By default, uses the authorization state in `$XDG\_RUNTIME\_DIR/containers/auth.json`, which is set using `(buildah login)`.  If XDG_RUNTIME_DIR is not set, the default is /run/containers/$UID/auth.json. If the authorization state is not found there, `$HOME/.docker/config.json` is checked, which is set using `(docker login)`.
+  An image in a registry implementing the "Docker Registry HTTP API V2". By default, uses the authorization state in `$XDG_RUNTIME_DIR/containers/auth.json`, which is set using `(buildah login)`.  See containers-auth.json(5) for more information. If the authorization state is not found there, `$HOME/.docker/config.json` is checked, which is set using `(docker login)`.
   If _docker-reference_ does not include a registry name, *localhost* will be consulted first, followed by any registries named in the registries configuration.
 
   **docker-archive:**_path_
@@ -55,7 +55,7 @@ Set the ARCH of the image to be pulled to the provided value instead of using th
 
 **--authfile** *path*
 
-Path of the authentication file. Default is ${XDG_\RUNTIME\_DIR}/containers/auth.json. If XDG_RUNTIME_DIR is not set, the default is /run/containers/$UID/auth.json. This file is created using `buildah login`.
+Path of the authentication file. Default is ${XDG_RUNTIME_DIR}/containers/auth.json. See containers-auth.json(5) for more information. This file is created using `buildah login`.
 
 If the authorization state is not found there, $HOME/.docker/config.json is checked, which is set using `docker login`.
 
@@ -73,10 +73,9 @@ more.
 
 Remove the specified capability from the default set of capabilities which will
 be supplied for subsequent *buildah run* invocations which use this container.
-The CAP\_AUDIT\_WRITE, CAP\_CHOWN, CAP\_DAC\_OVERRIDE, CAP\_FOWNER,
-CAP\_FSETID, CAP\_KILL, CAP\_MKNOD, CAP\_NET\_BIND\_SERVICE, CAP\_SETFCAP,
-CAP\_SETGID, CAP\_SETPCAP, CAP\_SETUID, and CAP\_SYS\_CHROOT capabilities are
-granted by default; this option can be used to remove them.
+The CAP\_CHOWN, CAP\_DAC\_OVERRIDE, CAP\_FOWNER, CAP\_FSETID, CAP\_KILL,
+CAP\_NET\_BIND\_SERVICE, CAP\_SETFCAP, CAP\_SETGID, CAP\_SETPCAP,
+and CAP\_SETUID capabilities are granted by default; this option can be used to remove them. The list of default capabilities is managed in containers.conf(5).
 
 If a capability is specified to both the **--cap-add** and **--cap-drop**
 options, it will be dropped, regardless of the order in which the options were
@@ -178,7 +177,23 @@ The [key[:passphrase]] to be used for decryption of images. Key can point to key
 
 **--device**=*device*
 
-Add a host device or devices under a directory to the container. The format is `<device-on-host>[:<device-on-container>][:<permissions>]` (e.g. --device=/dev/sdc:/dev/xvdc:rwm)
+Add a host device, or devices under a directory, to the environment of
+subsequent **buildah run** invocations for the new working container.  The
+optional *permissions* parameter can be used to specify device permissions,
+using any one or more of **r** for read, **w** for write, and **m** for
+**mknod**(2).
+
+Example: **--device=/dev/sdc:/dev/xvdc:rwm**.
+
+Note: if _host-device_ is a symbolic link then it will be resolved first.
+The container will only store the major and minor numbers of the host device.
+
+The device to share can also be specified using a Container Device Interface
+(CDI) specification (https://github.com/cncf-tags/container-device-interface).
+
+Note: if the user only has access rights via a group, accessing the device
+from inside a rootless container will fail. The **crun**(1) runtime offers a
+workaround for this by adding the option **--annotation run.oci.keep_original_groups=1**.
 
 **--dns**=[]
 
@@ -204,6 +219,20 @@ Recognized formats include *oci* (OCI image-spec v1.0, the default) and
 
 Note: You can also override the default format by setting the BUILDAH\_FORMAT
 environment variable.  `export BUILDAH_FORMAT=docker`
+
+**--group-add**=*group* | *keep-groups*
+
+Assign additional groups to the primary user running within the container
+process.
+
+- `keep-groups` is a special flag that tells Buildah to keep the supplementary
+group access.
+
+Allows container to use the user's supplementary group access. If file systems
+or devices are only accessible by the rootless user's group, this flag tells the
+OCI runtime to pass the group access into the container. Currently only
+available with the `crun` OCI runtime. Note: `keep-groups` is exclusive, other
+groups cannot be specified with this flag.
 
 **--http-proxy**
 
@@ -266,15 +295,64 @@ unit, `b` is used. Set LIMIT to `-1` to enable unlimited swap.
 
 A *name* for the working container
 
-**--network** *how*, **--net** *how*
+**--network**=*mode*, **--net**=*mode*
 
 Sets the configuration for network namespaces when the container is subsequently
 used for `buildah run`.
-The configured value can be "" (the empty string) or "container" to indicate
-that a new network namespace should be created, or it can be "host" to indicate
-that the network namespace in which `Buildah` itself is being run should be
-reused, or it can be the path to a network namespace which is already in use by
-another process.
+
+Valid _mode_ values are:
+
+- **none**: no networking. Invalid if using **--dns**, **--dns-opt**, or **--dns-search**;
+- **host**: use the host network stack. Note: the host mode gives the container full access to local system services such as D-bus and is therefore considered insecure;
+- **ns:**_path_: path to a network namespace to join;
+- **private**: create a new namespace for the container (default)
+- **\<network name|ID\>**: Join the network with the given name or ID, e.g. use `--network mynet` to join the network with the name mynet. Only supported for rootful users.
+- **slirp4netns[:OPTIONS,...]**: use **slirp4netns**(1) to create a user network stack. This is the default for rootless containers. It is possible to specify these additional options, they can also be set with `network_cmd_options` in containers.conf:
+  - **allow_host_loopback=true|false**: Allow slirp4netns to reach the host loopback IP (default is 10.0.2.2 or the second IP from slirp4netns cidr subnet when changed, see the cidr option below). The default is false.
+  - **mtu=MTU**: Specify the MTU to use for this network. (Default is `65520`).
+  - **cidr=CIDR**: Specify ip range to use for this network. (Default is `10.0.2.0/24`).
+  - **enable_ipv6=true|false**: Enable IPv6. Default is true. (Required for `outbound_addr6`).
+  - **outbound_addr=INTERFACE**: Specify the outbound interface slirp binds to (ipv4 traffic only).
+  - **outbound_addr=IPv4**: Specify the outbound ipv4 address slirp binds to.
+  - **outbound_addr6=INTERFACE**: Specify the outbound interface slirp binds to (ipv6 traffic only).
+  - **outbound_addr6=IPv6**: Specify the outbound ipv6 address slirp binds to.
+- **pasta[:OPTIONS,...]**: use **pasta**(1) to create a user-mode networking
+    stack. \
+    This is only supported in rootless mode. \
+    By default, IPv4 and IPv6 addresses and routes, as well as the pod interface
+    name, are copied from the host. If port forwarding isn't configured, ports
+    are forwarded dynamically as services are bound on either side (init
+    namespace or container namespace). Port forwarding preserves the original
+    source IP address. Options described in pasta(1) can be specified as
+    comma-separated arguments. \
+    In terms of pasta(1) options, **--config-net** is given by default, in
+    order to configure networking when the container is started, and
+    **--no-map-gw** is also assumed by default, to avoid direct access from
+    container to host using the gateway address. The latter can be overridden
+    by passing **--map-gw** in the pasta-specific options (despite not being an
+    actual pasta(1) option). \
+    Also, **-t none** and **-u none** are passed to disable
+    automatic port forwarding based on bound ports. Similarly, **-T none** and
+    **-U none** are given to disable the same functionality from container to
+    host. \
+    Some examples:
+    - **pasta:--map-gw**: Allow the container to directly reach the host using the
+        gateway address.
+    - **pasta:--mtu,1500**: Specify a 1500 bytes MTU for the _tap_ interface in
+        the container.
+    - **pasta:--ipv4-only,-a,10.0.2.0,-n,24,-g,10.0.2.2,--dns-forward,10.0.2.3,-m,1500,--no-ndp,--no-dhcpv6,--no-dhcp**,
+        equivalent to default slirp4netns(1) options: disable IPv6, assign
+        `10.0.2.0/24` to the `tap0` interface in the container, with gateway
+        `10.0.2.3`, enable DNS forwarder reachable at `10.0.2.3`, set MTU to 1500
+        bytes, disable NDP, DHCPv6 and DHCP support.
+    - **pasta:-I,tap0,--ipv4-only,-a,10.0.2.0,-n,24,-g,10.0.2.2,--dns-forward,10.0.2.3,--no-ndp,--no-dhcpv6,--no-dhcp**,
+        equivalent to default slirp4netns(1) options with Podman overrides: same as
+        above, but leave the MTU to 65520 bytes
+    - **pasta:-t,auto,-u,auto,-T,auto,-U,auto**: enable automatic port forwarding
+        based on observed bound ports from both host and container sides
+    - **pasta:-T,5201**: enable forwarding of TCP port 5201 from container to
+        host, using the loopback interface instead of the tap interface for improved
+        performance
 
 **--os**="OS"
 
@@ -310,24 +388,23 @@ the help of emulation provided by packages like `qemu-user-static`.
 
 **--pull**
 
-When the flag is enabled or set explicitly to `true` (with *--pull=true*), attempt to pull the latest image from the registries
-listed in registries.conf if a local image does not exist or the image is newer
-than the one in storage. Raise an error if the image is not in any listed
-registry and is not present locally.
+Pull image policy. The default is **missing**.
 
-If the flag is disabled (with *--pull=false*), do not pull the image from the
-registry, use only the local version. Raise an error if the image is not
-present locally.
+- **always**: Pull base and SBOM scanner images from the registries listed in
+registries.conf.  Raise an error if a base or SBOM scanner image is not found
+in the registries, even if an image with the same name is present locally.
 
-If the pull flag is set to `always` (with *--pull=always*),
-pull the image from the first registry it is found in as listed in registries.conf.
-Raise an error if not found in the registries, even if the image is present locally.
+- **missing**: SBOM scanner images only if they could not be found in the local
+containers storage.  Raise an error if no image could be found and the pull
+fails.
 
-If the pull flag is set to `never` (with *--pull=never*),
-Do not pull the image from the registry, use only the local version. Raise an error
-if the image is not present locally.
+- **never**: Do not pull base and SBOM scanner images from registries, use only
+the local versions.  Raise an error if the image is not present locally.
 
-Defaults to *true*.
+- **newer**: Pull base and SBOM scanner images from the registries listed in
+registries.conf if newer.  Raise an error if a base or SBOM scanner image is
+not found in the registries when image with the same name is not present
+locally.
 
 **--quiet**, **-q**
 
@@ -525,12 +602,12 @@ Set the architecture variant of the image to be pulled.
 
    Create a bind mount. If you specify, ` -v /HOST-DIR:/CONTAINER-DIR`, Buildah
    bind mounts `/HOST-DIR` in the host to `/CONTAINER-DIR` in the Buildah
-   container. The `OPTIONS` are a comma delimited list and can be: <sup>[[1]](#Footnote1)</sup>
+   container. The `OPTIONS` are a comma delimited list and can be:
 
    * [rw|ro]
    * [U]
    * [z|Z|O]
-   * [`[r]shared`|`[r]slave`|`[r]private`|`[r]unbindable`]
+   * [`[r]shared`|`[r]slave`|`[r]private`|`[r]unbindable`] <sup>[[1]](#Footnote1)</sup>
 
 The `CONTAINER-DIR` must be an absolute path such as `/src/docs`. The `HOST-DIR`
 must be an absolute path as well. Buildah bind-mounts the `HOST-DIR` to the
@@ -578,9 +655,9 @@ Only the current container can use a private volume.
 
   Note:
 
-     - The `O` flag is not allowed to be specified with the `Z` or `z` flags. Content mounted into the container is labeled with the private label.
+   - The `O` flag is not allowed to be specified with the `Z` or `z` flags. Content mounted into the container is labeled with the private label.
        On SELinux systems, labels in the source directory need to be readable by the container label. If not, SELinux container separation must be disabled for the container to work.
-     - Modification of the directory volume mounted into the container with an overlay mount can cause unexpected failures.  It is recommended that you do not modify the directory until the container finishes running.
+   - Modification of the directory volume mounted into the container with an overlay mount can cause unexpected failures.  It is recommended that you do not modify the directory until the container finishes running.
 
 By default bind mounted volumes are `private`. That means any mounts done
 inside container will not be visible on the host and vice versa. This behavior can
@@ -675,7 +752,7 @@ registries.conf is the configuration file which specifies which container regist
 Signature policy file.  This defines the trust policy for container images.  Controls which container registries can be used for image, and whether or not the tool should trust the images.
 
 ## SEE ALSO
-buildah(1), buildah-pull(1), buildah-login(1), docker-login(1), namespaces(7), pid\_namespaces(7), containers-policy.json(5), containers-registries.conf(5), user\_namespaces(7)
+buildah(1), buildah-pull(1), buildah-login(1), docker-login(1), namespaces(7), pid\_namespaces(7), containers-policy.json(5), containers-registries.conf(5), user\_namespaces(7), containers.conf(5), containers-auth.json(5)
 
 ## FOOTNOTES
 <a name="Footnote1">1</a>: The Buildah project is committed to inclusivity, a core value of open source. The `master` and `slave` mount propagation terminology used here is problematic and divisive, and should be changed. However, these terms are currently used within the Linux kernel and must be used as-is at this time. When the kernel maintainers rectify this usage, Buildah will follow suit immediately.

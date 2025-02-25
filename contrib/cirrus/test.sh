@@ -26,8 +26,15 @@ if [[ "$PRIV_NAME" == "rootless" ]] && [[ "$UID" -eq 0 ]]; then
             -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
             -o CheckHostIP=no $GOSRC/$SCRIPT_BASE/test.sh $1
     # Does not return!
+elif [[ "$UID" -ne 0 ]]; then
+    # Load important env. vars written during setup.sh (run as root)
+    # call to setup_rootless()
+    source /home/$ROOTLESS_USER/ci_environment
 fi
 # else: not running rootless, do nothing special
+
+msg "Test-time env. var. definitions (filtered):"
+show_env_vars
 
 if [[ "$IN_PODMAN" == "true" ]]
 then
@@ -56,18 +63,24 @@ else
                 export GITVALIDATE_EPOCH="$CIRRUS_LAST_GREEN_CHANGE"
             fi
             echo "Linting & Validating from ${GITVALIDATE_EPOCH:-default EPOCH}"
-            showrun make lint LINTFLAGS="--deadline=20m --color=always -j1"
+            showrun make lint LINTFLAGS="--timeout=20m --color=always -j1"
             showrun make validate
             ;;
         unit)
-            showrun make test-unit
+            race=
+            if [[ -z "$CIRRUS_PR" ]]; then
+               # If not running on a PR then run unit tests
+               # with appropriate `-race` flags.
+               race="-race"
+            fi
+            showrun make test-unit RACEFLAGS=$race
             ;;
         conformance)
             # Typically it's undesirable to install packages at runtime.
             # This test compares images built with the "latest" version
             # of docker, against images built with buildah. Runtime installs
             # are required to ensure the latest docker version is used.
-            [[ "$OS_RELEASE_ID" == "ubuntu" ]] || \
+            [[ "$OS_RELEASE_ID" == "debian" ]] || \
                 bad_os_id_ver
 
             systemctl enable --now docker

@@ -10,6 +10,12 @@ load helpers
   run_buildah 0 logout localhost:$REGISTRY_PORT
 }
 
+@test "authenticate: with stdin" {
+  start_registry testuserfoo testpassword
+  run_buildah 0 login localhost:$REGISTRY_PORT --cert-dir $REGISTRY_DIR --username testuserfoo --password-stdin <<< testpassword
+  run_buildah 0 logout localhost:$REGISTRY_PORT
+}
+
 @test "authenticate: login/logout should succeed with XDG_RUNTIME_DIR unset" {
   unset XDG_RUNTIME_DIR
 
@@ -26,9 +32,24 @@ load helpers
   run_buildah 0 login --cert-dir $REGISTRY_DIR --username testuserfoo --password testpassword localhost:$REGISTRY_PORT
 
   run_buildah 125 logout --authfile /tmp/nonexistent localhost:$REGISTRY_PORT
-  expect_output "Error: checking authfile: stat /tmp/nonexistent: no such file or directory"
+  assert "$output" =~ "Error: credential file is not accessible: (faccessat|stat) /tmp/nonexistent: no such file or directory"
+
+  run_buildah 125 logout --compat-auth-file /tmp/nonexistent localhost:$REGISTRY_PORT
+  assert "$output" =~ "Error: credential file is not accessible: (faccessat|stat) /tmp/nonexistent: no such file or directory"
 
   run_buildah 0 logout localhost:$REGISTRY_PORT
+}
+
+@test "authenticate: logout should fail with inconsistent authfiles" {
+  ambiguous_file=${TEST_SCRATCH_DIR}/ambiguous-auth.json
+  echo '{}' > $ambiguous_file # To make sure we are not hitting the “file not found” path
+
+  # We don’t start a real registry; login should never get that far.
+  run_buildah 125 login --authfile "$ambiguous_file" --compat-auth-file "$ambiguous_file" localhost:5000
+  expect_output "Error: options for paths to the credential file and to the Docker-compatible credential file can not be set simultaneously"
+
+  run_buildah 125 logout --authfile "$ambiguous_file" --compat-auth-file "$ambiguous_file" localhost:5000
+  expect_output "Error: options for paths to the credential file and to the Docker-compatible credential file can not be set simultaneously"
 }
 
 @test "authenticate: cert and credentials" {
@@ -133,7 +154,7 @@ EOM
 
   # After login, push should pass
   run_buildah push $WITH_POLICY_JSON --tls-verify=false alpine localhost:$REGISTRY_PORT/my-alpine
-  expect_output --substring "Storing signatures"
+  expect_output --substring "Writing manifest to image destination"
 
   run_buildah 125 login --tls-verify=false --username testuser --password WRONGPASSWORD localhost:$REGISTRY_PORT
   expect_output --substring 'logging into "localhost:'"$REGISTRY_PORT"'": invalid username/password' \

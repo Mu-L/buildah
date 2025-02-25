@@ -34,14 +34,14 @@ the container.
 
 **--cap-drop**=*CAP\_xxx*
 
-Add the specified capability from the set of capabilities which will be granted
+Drop the specified capability from the set of capabilities which will be granted
 to the specified command.
-The CAP\_AUDIT\_WRITE, CAP\_CHOWN, CAP\_DAC\_OVERRIDE, CAP\_FOWNER,
-CAP\_FSETID, CAP\_KILL, CAP\_MKNOD, CAP\_NET\_BIND\_SERVICE, CAP\_SETFCAP,
-CAP\_SETGID, CAP\_SETPCAP, CAP\_SETUID, and CAP\_SYS\_CHROOT capabilities are
+The CAP\_CHOWN, CAP\_DAC\_OVERRIDE, CAP\_FOWNER,
+CAP\_FSETID, CAP\_KILL, CAP\_NET\_BIND\_SERVICE, CAP\_SETFCAP,
+CAP\_SETGID, CAP\_SETPCAP, and CAP\_SETUID capabilities are
 granted by default; this option can be used to remove them from the defaults,
 which may have been modified by **--cap-add** and **--cap-drop** options used
-with the *buildah from* invocation which created the container.
+with the *buildah from* invocation which created the container. The list of default capabilities is managed in containers.conf(5).
 
 If a capability is specified to both the **--cap-add** and **--cap-drop**
 options, it will be dropped, regardless of the order in which the options were
@@ -59,6 +59,25 @@ that the cgroup namespace in which `buildah` itself is being run should be reuse
 Allows setting context directory for current RUN invocation. Specifying a context
 directory causes RUN context to consider context directory as root directory for
 specified source in `--mount` of type 'bind'.
+
+**--device**=*device*
+
+Add a host device, or devices under a directory, to the environment in which
+the command will be run.  The optional *permissions* parameter can be used to
+specify device permissions, using any one or more of
+**r** for read, **w** for write, and **m** for **mknod**(2).
+
+Example: **--device=/dev/sdc:/dev/xvdc:rwm**.
+
+Note: if _host-device_ is a symbolic link then it will be resolved first.
+The container will only store the major and minor numbers of the host device.
+
+The device to share can also be specified using a Container Device Interface
+(CDI) specification (https://github.com/cncf-tags/container-device-interface).
+
+Note: if the user only has access rights via a group, accessing the device
+from inside a rootless container will fail. The **crun**(1) runtime offers a
+workaround for this by adding the option **--annotation run.oci.keep_original_groups=1**.
 
 **--env**, **-e** *env=value*
 
@@ -99,7 +118,7 @@ BUILDAH\_ISOLATION environment variable.  `export BUILDAH_ISOLATION=oci`
 
 Attach a filesystem mount to the container
 
-Current supported mount TYPES are bind, cache, secret and tmpfs. <sup>[[1]](#Footnote1)</sup>
+Current supported mount TYPES are bind, cache, secret and tmpfs. Writes to `bind` and `tmpfs` mounts are discarded after the command finishes, while changes to `cache` mounts persist across uses.
 
        e.g.
 
@@ -111,19 +130,19 @@ Current supported mount TYPES are bind, cache, secret and tmpfs. <sup>[[1]](#Foo
 
        Common Options:
 
-              · src, source: mount source spec for bind and volume. Mandatory for bind. If `from` is specified, `src` is the subpath in the `from` field.
+              · src, source: mount source spec for bind and cache. Mandatory for bind. If `from` is specified, `src` is the subpath in the `from` field.
 
-              · dst, destination, target: mount destination spec.
+              · dst, destination, target: location where the command being run should see the content being mounted.
 
-              · ro, read-only: true or false (default).
+              · ro, read-only: (default true for `type=bind`, false for `type=tmpfs`, `type=cache`).
 
        Options specific to bind:
 
-              · bind-propagation: shared, slave, private, rshared, rslave, or rprivate(default). See also mount(2).
+              · bind-propagation: shared, slave, private, rshared, rslave, or rprivate(default). See also mount(2). <sup>[[1]](#Footnote1)</sup>
 
               . bind-nonrecursive: do not setup a recursive bind mount.  By default it is recursive.
 
-              · from: stage or image name for the root of the source. Defaults to the build context.
+              · from: image name for the root of the source. Defaults to **--contextdir**, mandatory if **--contextdir** was not specified.
 
               · z: Set shared SELinux label on mounted destination. Use if SELinux is enabled on host machine.
 
@@ -143,7 +162,7 @@ Current supported mount TYPES are bind, cache, secret and tmpfs. <sup>[[1]](#Foo
 
        Options specific to cache:
 
-              · id: Create a separate cache directory for a particular id.
+              · id: Distinguish this cache from other caches using this ID rather than the target mount path.
 
               · mode: File mode for new cache directory in octal. Default 0755.
 
@@ -155,6 +174,8 @@ Current supported mount TYPES are bind, cache, secret and tmpfs. <sup>[[1]](#Foo
 
               · from: stage name for the root of the source. Defaults to host cache directory.
 
+              · sharing: Whether other users of this cache need to wait for this command to complete (`sharing=locked`) or not (`sharing=shared`, which is the default).
+
               · z: Set shared SELinux label on mounted destination. Enabled by default if SELinux is enabled on the host machine.
 
               · Z: Set private SELinux label on mounted destination. Use if SELinux is enabled on host machine.
@@ -163,14 +184,69 @@ Current supported mount TYPES are bind, cache, secret and tmpfs. <sup>[[1]](#Foo
 
 Sets the configuration for the network namespace for the container.
 
-- **none**: no networking;
+Valid _mode_ values are:
+
+- **none**: no networking. Invalid if using **--dns**, **--dns-opt**, or **--dns-search**;
 - **host**: use the host network stack. Note: the host mode gives the container full access to local system services such as D-bus and is therefore considered insecure;
 - **ns:**_path_: path to a network namespace to join;
-- `private`: create a new namespace for the container (default)
+- **private**: create a new namespace for the container (default)
+- **\<network name|ID\>**: Join the network with the given name or ID, e.g. use `--network mynet` to join the network with the name mynet. Only supported for rootful users.
+- **slirp4netns[:OPTIONS,...]**: use **slirp4netns**(1) to create a user network stack. This is the default for rootless containers. It is possible to specify these additional options, they can also be set with `network_cmd_options` in containers.conf:
+  - **allow_host_loopback=true|false**: Allow slirp4netns to reach the host loopback IP (default is 10.0.2.2 or the second IP from slirp4netns cidr subnet when changed, see the cidr option below). The default is false.
+  - **mtu=MTU**: Specify the MTU to use for this network. (Default is `65520`).
+  - **cidr=CIDR**: Specify ip range to use for this network. (Default is `10.0.2.0/24`).
+  - **enable_ipv6=true|false**: Enable IPv6. Default is true. (Required for `outbound_addr6`).
+  - **outbound_addr=INTERFACE**: Specify the outbound interface slirp binds to (ipv4 traffic only).
+  - **outbound_addr=IPv4**: Specify the outbound ipv4 address slirp binds to.
+  - **outbound_addr6=INTERFACE**: Specify the outbound interface slirp binds to (ipv6 traffic only).
+  - **outbound_addr6=IPv6**: Specify the outbound ipv6 address slirp binds to.
+- **pasta[:OPTIONS,...]**: use **pasta**(1) to create a user-mode networking
+    stack. \
+    This is only supported in rootless mode. \
+    By default, IPv4 and IPv6 addresses and routes, as well as the pod interface
+    name, are copied from the host. If port forwarding isn't configured, ports
+    are forwarded dynamically as services are bound on either side (init
+    namespace or container namespace). Port forwarding preserves the original
+    source IP address. Options described in pasta(1) can be specified as
+    comma-separated arguments. \
+    In terms of pasta(1) options, **--config-net** is given by default, in
+    order to configure networking when the container is started, and
+    **--no-map-gw** is also assumed by default, to avoid direct access from
+    container to host using the gateway address. The latter can be overridden
+    by passing **--map-gw** in the pasta-specific options (despite not being an
+    actual pasta(1) option). \
+    Also, **-t none** and **-u none** are passed to disable
+    automatic port forwarding based on bound ports. Similarly, **-T none** and
+    **-U none** are given to disable the same functionality from container to
+    host. \
+    Some examples:
+    - **pasta:--map-gw**: Allow the container to directly reach the host using the
+        gateway address.
+    - **pasta:--mtu,1500**: Specify a 1500 bytes MTU for the _tap_ interface in
+        the container.
+    - **pasta:--ipv4-only,-a,10.0.2.0,-n,24,-g,10.0.2.2,--dns-forward,10.0.2.3,-m,1500,--no-ndp,--no-dhcpv6,--no-dhcp**,
+        equivalent to default slirp4netns(1) options: disable IPv6, assign
+        `10.0.2.0/24` to the `tap0` interface in the container, with gateway
+        `10.0.2.3`, enable DNS forwarder reachable at `10.0.2.3`, set MTU to 1500
+        bytes, disable NDP, DHCPv6 and DHCP support.
+    - **pasta:-I,tap0,--ipv4-only,-a,10.0.2.0,-n,24,-g,10.0.2.2,--dns-forward,10.0.2.3,--no-ndp,--no-dhcpv6,--no-dhcp**,
+        equivalent to default slirp4netns(1) options with Podman overrides: same as
+        above, but leave the MTU to 65520 bytes
+    - **pasta:-t,auto,-u,auto,-T,auto,-U,auto**: enable automatic port forwarding
+        based on observed bound ports from both host and container sides
+    - **pasta:-T,5201**: enable forwarding of TCP port 5201 from container to
+        host, using the loopback interface instead of the tap interface for improved
+        performance
+
+**--no-hostname**
+
+Do not create the _/etc/hostname_ file in the container for RUN instructions.
+
+By default, Buildah manages the _/etc/hostname_ file, adding the container's own hostname.  When the **--no-hostname** option is set, the image's _/etc/hostname_ will be preserved unmodified if it exists.
 
 **--no-hosts**
 
-Do not create _/etc/hosts_ for the container.
+Do not create the _/etc/hosts_ file in the container for RUN instructions.
 
 By default, Buildah manages _/etc/hosts_, adding the container's own IP address.
 **--no-hosts** disables this, and the image's _/etc/hosts_ will be preserved unmodified.
@@ -235,12 +311,12 @@ process.
 
 Create a bind mount. If you specify, ` -v /HOST-DIR:/CONTAINER-DIR`, Buildah
 bind mounts `/HOST-DIR` in the host to `/CONTAINER-DIR` in the Buildah
-container. The `OPTIONS` are a comma delimited list and can be: <sup>[[1]](#Footnote1)</sup>
+container. The `OPTIONS` are a comma delimited list and can be:
 
    * [rw|ro]
    * [U]
    * [z|Z]
-   * [`[r]shared`|`[r]slave`|`[r]private`]
+   * [`[r]shared`|`[r]slave`|`[r]private`] <sup>[[1]](#Footnote1)</sup>
 
 The `CONTAINER-DIR` must be an absolute path such as `/src/docs`. The `HOST-DIR`
 must be an absolute path as well. Buildah bind-mounts the `HOST-DIR` to the
@@ -342,7 +418,7 @@ buildah run -v /path/on/host:/path/in/container:z,U containerID sh
 buildah run --mount type=bind,src=/tmp/on:host,dst=/in:container,ro containerID sh
 
 ## SEE ALSO
-buildah(1), buildah-from(1), buildah-config(1), namespaces(7), pid\_namespaces(7), crun(1), runc(8)
+buildah(1), buildah-from(1), buildah-config(1), namespaces(7), pid\_namespaces(7), crun(1), runc(8), containers.conf(5)
 
 ## FOOTNOTES
 <a name="Footnote1">1</a>: The Buildah project is committed to inclusivity, a core value of open source. The `master` and `slave` mount propagation terminology used here is problematic and divisive, and should be changed. However, these terms are currently used within the Linux kernel and must be used as-is at this time. When the kernel maintainers rectify this usage, Buildah will follow suit immediately.

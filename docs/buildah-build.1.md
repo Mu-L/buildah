@@ -51,7 +51,7 @@ Set the ARCH of the image to be built, and that of the base image to be pulled, 
 
 **--authfile** *path*
 
-Path of the authentication file. Default is ${XDG_\RUNTIME\_DIR}/containers/auth.json. If XDG_RUNTIME_DIR is not set, the default is /run/containers/$UID/auth.json. This file is created using `buildah login`.
+Path of the authentication file. Default is ${XDG_RUNTIME_DIR}/containers/auth.json. See containers-auth.json(5) for more information. This file is created using `buildah login`.
 
 If the authorization state is not found there, $HOME/.docker/config.json is checked, which is set using `docker login`.
 
@@ -67,6 +67,18 @@ resulting image's configuration.
 
 Please refer to the [BUILD TIME VARIABLES](#build-time-variables) section for the
 list of variables that can be overridden within the Containerfile at run time.
+
+**--build-arg-file** *path*
+
+Specifies a file containing lines of build arguments of the form arg=value. The suggested file name is argfile.conf.
+
+Comment lines beginning with `#` are ignored, along with blank lines. All others should be of the `arg=value` format passed to `--build-arg`.
+
+If several arguments are provided via the `--build-arg-file` and `--build-arg` options, the build arguments will be merged across all of the provided files and command line arguments.
+
+Any file provided in a `--build-arg-file` option will be read before the arguments supplied via the `--build-arg` option.
+
+When a given argument name is specified several times, the last instance is the one that is passed to the resulting builds. This means `--build-arg` values always override those in a `--build-arg-file`.
 
 **--build-context** *name=value*
 
@@ -96,12 +108,12 @@ The value of `[name]` is matched with the following priority order:
 
 **--cache-from**
 
-Repository to utilize as a potential cache source. When specified, Buildah will try to look for
-cache images in the specified repository and will attempt to pull cache images instead of actually
+Repository to utilize as a potential list of cache sources. When specified, Buildah will try to look for
+cache images in the specified repositories and will attempt to pull cache images instead of actually
 executing the build steps locally. Buildah will only attempt to pull previously cached images if they
 are considered as valid cache hits.
 
-Use the `--cache-to` option to populate a remote repository with cache content.
+Use the `--cache-to` option to populate a remote repository or repositories with cache content.
 
 Example
 
@@ -112,10 +124,16 @@ buildah build -t test --layers --cache-to registry/myrepo/cache --cache-from reg
 
 Note: `--cache-from` option is ignored unless `--layers` is specified.
 
+Note: Buildah's `--cache-from` option is designed differently than Docker and BuildKit's `--cache-from` option. Buildah's
+distributed cache mechanism pulls intermediate images from the remote registry itself, unlike Docker and BuildKit where
+the intermediate image is stored in the image itself. Buildah's approach is similar to kaniko, which
+does not inflate the size of the original image with intermediate images.  Also, intermediate images can truly be
+kept distributed across one or more remote registries using Buildah's caching mechanism.
+
 **--cache-to**
 
-Set this flag to specify a remote repository that will be used to store cache images. Buildah will attempt to
-push newly built cache image to the remote repository.
+Set this flag to specify list of remote repositories that will be used to store cache images. Buildah will attempt to
+push newly built cache image to the remote repositories.
 
 Note: Use the `--cache-from` option in order to use cache content in a remote repository.
 
@@ -127,6 +145,12 @@ buildah build -t test --layers --cache-to registry/myrepo/cache --cache-from reg
 ```
 
 Note: `--cache-to` option is ignored unless `--layers` is specified.
+
+Note: Buildah's `--cache-to` option is designed differently than Docker and BuildKit's `--cache-to` option. Buildah's
+distributed cache mechanism push intermediate images to the remote registry itself, unlike Docker and BuildKit where
+the intermediate image is stored in the image itself. Buildah's approach is similar to kaniko, which
+does not inflate the size of the original image with intermediate images.  Also, intermediate images can truly be
+kept distributed across one or more remote registries using Buildah's caching mechanism.
 
 **--cache-ttl** *duration*
 
@@ -148,10 +172,10 @@ more.
 
 When executing RUN instructions, run the command specified in the instruction
 with the specified capability removed from its capability set.
-The CAP\_AUDIT\_WRITE, CAP\_CHOWN, CAP\_DAC\_OVERRIDE, CAP\_FOWNER,
-CAP\_FSETID, CAP\_KILL, CAP\_MKNOD, CAP\_NET\_BIND\_SERVICE, CAP\_SETFCAP,
-CAP\_SETGID, CAP\_SETPCAP, CAP\_SETUID, and CAP\_SYS\_CHROOT capabilities are
-granted by default; this option can be used to remove them.
+The CAP\_CHOWN, CAP\_DAC\_OVERRIDE, CAP\_FOWNER, CAP\_FSETID, CAP\_KILL,
+CAP\_NET\_BIND\_SERVICE, CAP\_SETFCAP, CAP\_SETGID, CAP\_SETPCAP, and
+CAP\_SETUID capabilities are granted by default; this option can be used to
+remove them. The list of default capabilities is managed in containers.conf(5).
 
 If a capability is specified to both the **--cap-add** and **--cap-drop**
 options, it will be dropped, regardless of the order in which the options were
@@ -159,7 +183,8 @@ given.
 
 **--cert-dir** *path*
 
-Use certificates at *path* (\*.crt, \*.cert, \*.key) to connect to the registry.
+Use certificates at *path* (\*.crt, \*.cert, \*.key) to connect to the registry
+and retrieve contents from HTTPS locations for ADD instructions.
 The default certificates directory is _/etc/containers/certs.d_.
 
 **--cgroup-parent**=""
@@ -172,6 +197,14 @@ Sets the configuration for cgroup namespaces when handling `RUN` instructions.
 The configured value can be "" (the empty string) or "private" to indicate
 that a new cgroup namespace should be created, or it can be "host" to indicate
 that the cgroup namespace in which `buildah` itself is being run should be reused.
+
+**--compat-volumes**
+
+Handle directories marked using the VOLUME instruction (both in this build, and
+those inherited from base images) such that their contents can only be modified
+by ADD and COPY instructions. Any changes made in those locations by RUN
+instructions will be reverted. Before the introduction of this option, this
+behavior was the default, but it is now disabled by default.
 
 **--compress**
 
@@ -264,20 +297,80 @@ The [username[:password]] to use to authenticate with the registry if required.
 If one or both values are not supplied, a command line prompt will appear and the
 value can be entered.  The password is entered without echo.
 
+**--cw** *options*
+
+Produce an image suitable for use as a confidential workload running in a
+trusted execution environment (TEE) using krun (i.e., *crun* built with the
+libkrun feature enabled and invoked as *krun*).  Instead of the conventional
+contents, the root filesystem of the image will contain an encrypted disk image
+and configuration information for krun.
+
+The value for *options* is a comma-separated list of key=value pairs, supplying
+configuration information which is needed for producing the additional data
+which will be included in the container image.
+
+Recognized _keys_ are:
+
+*attestation_url*: The location of a key broker / attestation server.
+If a value is specified, the new image's workload ID, along with the passphrase
+used to encrypt the disk image, will be registered with the server, and the
+server's location will be stored in the container image.
+At run-time, krun is expected to contact the server to retrieve the passphrase
+using the workload ID, which is also stored in the container image.
+If no value is specified, a *passphrase* value *must* be specified.
+
+*cpus*: The number of virtual CPUs which the image expects to be run with at
+run-time.  If not specified, a default value will be supplied.
+
+*firmware_library*: The location of the libkrunfw-sev shared library.  If not
+specified, `buildah` checks for its presence in a number of hard-coded
+locations.
+
+*memory*: The amount of memory which the image expects to be run with at
+run-time, as a number of megabytes.  If not specified, a default value will be
+supplied.
+
+*passphrase*: The passphrase to use to encrypt the disk image which will be
+included in the container image.
+If no value is specified, but an *attestation_url* value is specified, a
+randomly-generated passphrase will be used.
+The authors recommend setting an *attestation_url* but not a *passphrase*.
+
+*slop*: Extra space to allocate for the disk image compared to the size of the
+container image's contents, expressed either as a percentage (..%) or a size
+value (bytes, or larger units if suffixes like KB or MB are present), or a sum
+of two or more such specifications.  If not specified, `buildah` guesses that
+25% more space than the contents will be enough, but this option is provided in
+case its guess is wrong.
+
+*type*: The type of trusted execution environment (TEE) which the image should
+be marked for use with.  Accepted values are "SEV" (AMD Secure Encrypted
+Virtualization - Encrypted State) and "SNP" (AMD Secure Encrypted
+Virtualization - Secure Nested Paging).  If not specified, defaults to "SNP".
+
+*workload_id*: A workload identifier which will be recorded in the container
+image, to be used at run-time for retrieving the passphrase which was used to
+encrypt the disk image.  If not specified, a semi-random value will be derived
+from the base image's image ID.
+
 **--decryption-key** *key[:passphrase]*
 
 The [key[:passphrase]] to be used for decryption of images. Key can point to keys and/or certificates. Decryption will be tried with all keys. If the key is protected by a passphrase, it is required to be passed in the argument and omitted otherwise.
 
 **--device**=*device*
 
-Add a host device to the container. Optional *permissions* parameter
-can be used to specify device permissions, it is combination of
+Add a host device, or devices under a directory, to the environment of any
+**RUN** instructions run during the build.  The optional *permissions*
+parameter can be used to specify device permissions, using any one or more of
 **r** for read, **w** for write, and **m** for **mknod**(2).
 
 Example: **--device=/dev/sdc:/dev/xvdc:rwm**.
 
-Note: if _host_device_ is a symbolic link then it will be resolved first.
+Note: if _host-device_ is a symbolic link then it will be resolved first.
 The container will only store the major and minor numbers of the host device.
+
+The device to share can also be specified using a Container Device Interface
+(CDI) specification (https://github.com/cncf-tags/container-device-interface).
 
 Note: if the user only has access rights via a group, accessing the device
 from inside a rootless container will fail. The **crun**(1) runtime offers a
@@ -319,6 +412,7 @@ Set custom DNS search domains. Invalid if using **--dns-search** with **--networ
 Add a value (e.g. env=*value*) to the built image.  Can be used multiple times.
 If neither `=` nor a `*value*` are specified, but *env* is set in the current
 environment, the value from the current environment will be added to the image.
+The value of *env* can be overridden by ENV instructions in the Containerfile.
 To remove an environment variable from the built image, use the `--unsetenv`
 option.
 
@@ -327,7 +421,7 @@ option.
 Specifies a Containerfile which contains instructions for building the image,
 either a local file or an **http** or **https** URL.  If more than one
 Containerfile is specified, *FROM* instructions will only be accepted from the
-first specified file.
+last specified file.
 
 If a local file is specified as the Containerfile and it does not exist, the
 context directory will be prepended to the local file value.
@@ -352,15 +446,29 @@ environment variable.  `export BUILDAH_FORMAT=docker`
 Overrides the first `FROM` instruction within the Containerfile.  If there are multiple
 FROM instructions in a Containerfile, only the first is changed.
 
+**--group-add**=*group* | *keep-groups*
+
+Assign additional groups to the primary user running within the container
+process.
+
+- `keep-groups` is a special flag that tells Buildah to keep the supplementary
+group access.
+
+Allows container to use the user's supplementary group access. If file systems
+or devices are only accessible by the rootless user's group, this flag tells the
+OCI runtime to pass the group access into the container. Currently only
+available with the `crun` OCI runtime. Note: `keep-groups` is exclusive, other
+groups cannot be specified with this flag.
+
 **--help**, **-h**
 
 Print usage statement
 
 **--hooks-dir** *path*
 
-Each `*.json` file in the path configures a hook for buildah build containers. For more details on the syntax of the JSON files and the semantics of hook injection. Buildah currently support both the 1.0.0 and 0.1.0 hook schemas, although the 0.1.0 schema is deprecated.
+Each `*.json` file in the path configures a hook for buildah build containers. For more details on the syntax of the JSON files and the semantics of hook injection, see oci-hooks(5). Buildah currently support both the 1.0.0 and 0.1.0 hook schemas, although the 0.1.0 schema is deprecated.
 
-This option may be set multiple times; paths from later options have higher precedence.
+This option may be set multiple times; paths from later options have higher precedence (oci-hooks(5) discusses directory precedence).
 
 For the annotation conditions, buildah uses any annotations set in the generated OCI configuration.
 
@@ -428,7 +536,7 @@ If *label* is named, but neither `=` nor a `value` is provided, then the *label*
 Users can set a special LABEL **io.containers.capabilities=CAP1,CAP2,CAP3** in
 a Containerfile that specifies the list of Linux capabilities required for the
 container to run properly. This label specified in a container image tells
-container engines, like Podman, to run the container with just these
+container engines, like Podman, which recognize this label to run the container with just these
 capabilities. The container engine launches the container with just the specified
 capabilities, as long as this list of capabilities is a subset of the default
 list.
@@ -436,6 +544,12 @@ list.
 If the specified capabilities are not in the default set, container engines
 should print an error message and will run the container with the default
 capabilities.
+
+**--layer-label** *label[=value]*
+
+Add an intermediate image *label* (e.g. label=*value*) to the metadata in intermediate images, i.e., any images built for
+non-final stages and for non-final instructions in stages when **--layers** is **true**. It can be used multiple times.
+If *label* is named, but neither `=` nor a `value` is provided, then the *label* is set to an empty value.
 
 **--layers** *bool-value*
 
@@ -494,14 +608,66 @@ Valid _mode_ values are:
 - **ns:**_path_: path to a network namespace to join;
 - **private**: create a new namespace for the container (default)
 - **\<network name|ID\>**: Join the network with the given name or ID, e.g. use `--network mynet` to join the network with the name mynet. Only supported for rootful users.
+- **slirp4netns[:OPTIONS,...]**: use **slirp4netns**(1) to create a user network stack. This is the default for rootless containers. It is possible to specify these additional options, they can also be set with `network_cmd_options` in containers.conf:
+  - **allow_host_loopback=true|false**: Allow slirp4netns to reach the host loopback IP (default is 10.0.2.2 or the second IP from slirp4netns cidr subnet when changed, see the cidr option below). The default is false.
+  - **mtu=MTU**: Specify the MTU to use for this network. (Default is `65520`).
+  - **cidr=CIDR**: Specify ip range to use for this network. (Default is `10.0.2.0/24`).
+  - **enable_ipv6=true|false**: Enable IPv6. Default is true. (Required for `outbound_addr6`).
+  - **outbound_addr=INTERFACE**: Specify the outbound interface slirp binds to (ipv4 traffic only).
+  - **outbound_addr=IPv4**: Specify the outbound ipv4 address slirp binds to.
+  - **outbound_addr6=INTERFACE**: Specify the outbound interface slirp binds to (ipv6 traffic only).
+  - **outbound_addr6=IPv6**: Specify the outbound ipv6 address slirp binds to.
+- **pasta[:OPTIONS,...]**: use **pasta**(1) to create a user-mode networking
+    stack. \
+    This is only supported in rootless mode. \
+    By default, IPv4 and IPv6 addresses and routes, as well as the pod interface
+    name, are copied from the host. If port forwarding isn't configured, ports
+    are forwarded dynamically as services are bound on either side (init
+    namespace or container namespace). Port forwarding preserves the original
+    source IP address. Options described in pasta(1) can be specified as
+    comma-separated arguments. \
+    In terms of pasta(1) options, **--config-net** is given by default, in
+    order to configure networking when the container is started, and
+    **--no-map-gw** is also assumed by default, to avoid direct access from
+    container to host using the gateway address. The latter can be overridden
+    by passing **--map-gw** in the pasta-specific options (despite not being an
+    actual pasta(1) option). \
+    Also, **-t none** and **-u none** are passed to disable
+    automatic port forwarding based on bound ports. Similarly, **-T none** and
+    **-U none** are given to disable the same functionality from container to
+    host. \
+    Some examples:
+    - **pasta:--map-gw**: Allow the container to directly reach the host using the
+        gateway address.
+    - **pasta:--mtu,1500**: Specify a 1500 bytes MTU for the _tap_ interface in
+        the container.
+    - **pasta:--ipv4-only,-a,10.0.2.0,-n,24,-g,10.0.2.2,--dns-forward,10.0.2.3,-m,1500,--no-ndp,--no-dhcpv6,--no-dhcp**,
+        equivalent to default slirp4netns(1) options: disable IPv6, assign
+        `10.0.2.0/24` to the `tap0` interface in the container, with gateway
+        `10.0.2.3`, enable DNS forwarder reachable at `10.0.2.3`, set MTU to 1500
+        bytes, disable NDP, DHCPv6 and DHCP support.
+    - **pasta:-I,tap0,--ipv4-only,-a,10.0.2.0,-n,24,-g,10.0.2.2,--dns-forward,10.0.2.3,--no-ndp,--no-dhcpv6,--no-dhcp**,
+        equivalent to default slirp4netns(1) options with Podman overrides: same as
+        above, but leave the MTU to 65520 bytes
+    - **pasta:-t,auto,-u,auto,-T,auto,-U,auto**: enable automatic port forwarding
+        based on observed bound ports from both host and container sides
+    - **pasta:-T,5201**: enable forwarding of TCP port 5201 from container to
+        host, using the loopback interface instead of the tap interface for improved
+        performance
 
 **--no-cache**
 
 Do not use existing cached images for the container build. Build from the start with a new set of cached layers.
 
+**--no-hostname**
+
+Do not create the _/etc/hostname_ file in the container for RUN instructions.
+
+By default, Buildah manages the _/etc/hostname_ file, adding the container's own hostname.  When the **--no-hostname** option is set, the image's _/etc/hostname_ will be preserved unmodified if it exists.
+
 **--no-hosts**
 
-Do not create _/etc/hosts_ for the container.
+Do not create the _/etc/hosts_ file in the container for RUN instructions.
 
 By default, Buildah manages _/etc/hosts_, adding the container's own IP address.
 **--no-hosts** disables this, and the image's _/etc/hosts_ will be preserved unmodified. Conflicts with the --add-host option.
@@ -554,7 +720,9 @@ Valid _type_ values are:
 - **tar**: write the resulting files as a single tarball (.tar).
 
 If no type is specified, the value defaults to **local**.
-Alternatively, instead of a comma-separated sequence, the value of **--output** can be just a destination (in the `**dest** format) (e.g. `--output some-path`, `--output -`) where `--output some-path` is treated as if **type=local** and `--output -` is treated as if **type=tar**.
+Alternatively, instead of a comma-separated sequence, the value of **--output** can be just a destination (in the `**dest**` format) (e.g. `--output some-path`, `--output -`) where `--output some-path` is treated as if **type=local** and `--output -` is treated as if **type=tar**.
+
+Note: The **--tag** option can also be used to change the file image format to supported `containers-transports(5)`.
 
 **--pid** *how*
 
@@ -569,7 +737,7 @@ process.
 
 Set the OS/ARCH of the built image (and its base image, if your build uses one)
 to the provided value instead of using the current operating system and
-architecture of the host (for example `linux/arm`).
+architecture of the host (for example `linux/arm`, `linux/arm64`, `linux/amd64`).
 
 The `--platform` flag can be specified more than once, or given a
 comma-separated list of values as its argument.  When more than one platform is
@@ -582,32 +750,29 @@ the `arch` command.  Valid OS and architecture name combinations are listed as
 values for $GOOS and $GOARCH at https://golang.org/doc/install/source#environment,
 and can also be found by running `go tool dist list`.
 
-While `buildah bud` is happy to use base images and build images for any
-platform that exists, `RUN` instructions will not be able to succeed without
-the help of emulation provided by packages like `qemu-user-static`.
+The `buildah build` command allows building images for all Linux architectures, even non-native architectures. When building images for a different architecture,  the `RUN` instructions require emulation software installed on the host provided by packages like `qemu-user-static`. Note: it is always preferred to build images on the native architecture if possible.
 
 **NOTE:** The `--platform` option may not be used in combination with the `--arch`, `--os`, or `--variant` options.
 
 **--pull**
 
-When the flag is enabled or set explicitly to `true` (with *--pull=true*), attempt to pull the latest image from the registries
-listed in registries.conf if a local image does not exist or the image is newer
-than the one in storage. Raise an error if the image is not in any listed
-registry and is not present locally.
+Pull image policy. The default is **missing**.
 
-If the flag is disabled (with *--pull=false*), do not pull the image from the
-registry, use only the local version. Raise an error if the image is not
-present locally.
+- **always**: Pull base and SBOM scanner images from the registries listed in
+registries.conf.  Raise an error if a base or SBOM scanner image is not found
+in the registries, even if an image with the same name is present locally.
 
-If the pull flag is set to `always` (with *--pull=always*),
-pull the image from the first registry it is found in as listed in registries.conf.
-Raise an error if not found in the registries, even if the image is present locally.
+- **missing**: SBOM scanner images only if they could not be found in the local
+containers storage.  Raise an error if no image could be found and the pull
+fails.
 
-If the pull flag is set to `never` (with *--pull=never*),
-Do not pull the image from the registry, use only the local version. Raise an error
-if the image is not present locally.
+- **never**: Do not pull base and SBOM scanner images from registries, use only
+the local versions.  Raise an error if the image is not present locally.
 
-Defaults to *true*.
+- **newer**: Pull base and SBOM scanner images from the registries listed in
+registries.conf if newer.  Raise an error if a base or SBOM scanner image is
+not found in the registries when image with the same name is not present
+locally.
 
 **--quiet**, **-q**
 
@@ -641,38 +806,145 @@ environment variable.  `export BUILDAH_RUNTIME=/usr/bin/crun`
 
 **--runtime-flag** *flag*
 
-Adds global flags for the container rutime. To list the supported flags, please
+Adds global flags for the container runtime. To list the supported flags, please
 consult the manpages of the selected container runtime.
 
 Note: Do not pass the leading `--` to the flag. To pass the runc flag `--log-format json`
 to buildah build, the option given would be `--runtime-flag log-format=json`.
 
-**--secret**=**id=id,src=path**
+**--sbom** *preset*
+
+Generate SBOMs (Software Bills Of Materials) for the output image by scanning
+the working container and build contexts using the named combination of scanner
+image, scanner commands, and merge strategy.  Must be specified with one or
+more of **--sbom-image-output**, **--sbom-image-purl-output**, **--sbom-output**,
+and **--sbom-purl-output**.  Recognized presets, and the set of options which
+they equate to:
+
+ - "syft", "syft-cyclonedx":
+     --sbom-scanner-image=ghcr.io/anchore/syft
+     --sbom-scanner-command="/syft scan -q dir:{ROOTFS} --output cyclonedx-json={OUTPUT}"
+     --sbom-scanner-command="/syft scan -q dir:{CONTEXT} --output cyclonedx-json={OUTPUT}"
+     --sbom-merge-strategy=merge-cyclonedx-by-component-name-and-version
+ - "syft-spdx":
+     --sbom-scanner-image=ghcr.io/anchore/syft
+     --sbom-scanner-command="/syft scan -q dir:{ROOTFS} --output spdx-json={OUTPUT}"
+     --sbom-scanner-command="/syft scan -q dir:{CONTEXT} --output spdx-json={OUTPUT}"
+     --sbom-merge-strategy=merge-spdx-by-package-name-and-versioninfo
+ - "trivy", "trivy-cyclonedx":
+     --sbom-scanner-image=ghcr.io/aquasecurity/trivy
+     --sbom-scanner-command="trivy filesystem -q {ROOTFS} --format cyclonedx --output {OUTPUT}"
+     --sbom-scanner-command="trivy filesystem -q {CONTEXT} --format cyclonedx --output {OUTPUT}"
+     --sbom-merge-strategy=merge-cyclonedx-by-component-name-and-version
+ - "trivy-spdx":
+     --sbom-scanner-image=ghcr.io/aquasecurity/trivy
+     --sbom-scanner-command="trivy filesystem -q {ROOTFS} --format spdx-json --output {OUTPUT}"
+     --sbom-scanner-command="trivy filesystem -q {CONTEXT} --format spdx-json --output {OUTPUT}"
+     --sbom-merge-strategy=merge-spdx-by-package-name-and-versioninfo
+
+**--sbom-image-output** *path*
+
+When generating SBOMs, store the generated SBOM in the specified path in the
+output image.  There is no default.
+
+**--sbom-image-purl-output** *path*
+
+When generating SBOMs, scan them for PURL ([package
+URL](https://github.com/package-url/purl-spec/blob/master/PURL-SPECIFICATION.rst))
+information, and save a list of found PURLs to the specified path in the output
+image.  There is no default.
+
+**--sbom-merge-strategy** *method*
+
+If more than one **--sbom-scanner-command** value is being used, use the
+specified method to merge the output from later commands with output from
+earlier commands.  Recognized values include:
+
+ - cat
+     Concatenate the files.
+ - merge-cyclonedx-by-component-name-and-version
+     Merge the "component" fields of JSON documents, ignoring values from
+     documents when the combination of their "name" and "version" values is
+     already present.  Documents are processed in the order in which they are
+     generated, which is the order in which the commands that generate them
+     were specified.
+ - merge-spdx-by-package-name-and-versioninfo
+     Merge the "package" fields of JSON documents, ignoring values from
+     documents when the combination of their "name" and "versionInfo" values is
+     already present.  Documents are processed in the order in which they are
+     generated, which is the order in which the commands that generate them
+     were specified.
+
+**--sbom-output** *file*
+
+When generating SBOMs, store the generated SBOM in the named file on the local
+filesystem.  There is no default.
+
+**--sbom-purl-output** *file*
+
+When generating SBOMs, scan them for PURL ([package
+URL](https://github.com/package-url/purl-spec/blob/master/PURL-SPECIFICATION.rst))
+information, and save a list of found PURLs to the named file in the local
+filesystem.  There is no default.
+
+**--sbom-scanner-command** *image*
+
+Generate SBOMs by running the specified command from the scanner image.  If
+multiple commands are specified, they are run in the order in which they are
+specified.  These text substitutions are performed:
+  - {ROOTFS}
+      The root of the built image's filesystem, bind mounted.
+  - {CONTEXT}
+      The build context and additional build contexts, bind mounted.
+  - {OUTPUT}
+      The name of a temporary output file, to be read and merged with others or copied elsewhere.
+
+**--sbom-scanner-image** *image*
+
+Generate SBOMs using the specified scanner image.
+
+**--secret**=**id=id[,src=*envOrFile*][,env=ENV][,type=file|env]**
 
 Pass secret information to be used in the Containerfile for building images
 in a safe way that will not end up stored in the final image, or be seen in other stages.
-The secret will be mounted in the container at the default location of `/run/secrets/id`.
+The value of the secret will be read from an environment variable or file named
+by the "id" option, or named by the "src" option if it is specified, or from an
+environment variable specified by the "env" option.
+The secret will be mounted in the container at `/run/secrets/*id*` by default.
 
 To later use the secret, use the --mount flag in a `RUN` instruction within a `Containerfile`:
 
 `RUN --mount=type=secret,id=mysecret cat /run/secrets/mysecret`
 
+The location of the secret in the container can be overridden using the
+"target", "dst", or "destination" option of the `RUN --mount` flag.
+
+`RUN --mount=type=secret,id=mysecret,target=/run/secrets/myothersecret cat /run/secrets/myothersecret`
+
+Note: changing the contents of secret files will not trigger a rebuild of layers that use said secrets.
+
 **--security-opt**=[]
 
 Security Options
 
-  "apparmor=unconfined" : Turn off apparmor confinement for the container
+  "apparmor=unconfined"   : Turn off apparmor confinement for the container
   "apparmor=your-profile" : Set the apparmor confinement profile for the container
 
-  "label=user:USER"   : Set the label user for the container
-  "label=role:ROLE"   : Set the label role for the container
-  "label=type:TYPE"   : Set the label type for the container
-  "label=level:LEVEL" : Set the label level for the container
-  "label=disable"     : Turn off label confinement for the container
-  "no-new-privileges" : Disable container processes from gaining additional privileges
+  "label=user:USER"       : Set the label user for the container
+  "label=role:ROLE"       : Set the label role for the container
+  "label=type:TYPE"       : Set the label type for the container
+  "label=level:LEVEL"     : Set the label level for the container
+  "label=disable"         : Turn off label confinement for the container
 
-  "seccomp=unconfined" : Turn off seccomp confinement for the container
-  "seccomp=profile.json :  White listed syscalls seccomp Json file to be used as a seccomp filter
+  "mask=_/path/1:/path/2_": The paths to mask separated by a colon. A masked path cannot be accessed inside the container.
+
+  "no-new-privileges"     : Disable container processes from gaining additional privileges
+
+  "seccomp=unconfined"    : Turn off seccomp confinement for the container
+  "seccomp=profile.json   : JSON configuration for a seccomp filter
+
+  "unmask=_ALL_ or _/path/1:/path/2_, or shell expanded paths (/proc/*): Paths to unmask separated by a colon. If set to **ALL**, it unmasks all the paths that are masked or made read-only by default.
+  The default masked paths are **/proc/acpi, /proc/kcore, /proc/keys, /proc/latency_stats, /proc/sched_debug, /proc/scsi, /proc/timer_list, /proc/timer_stats, /sys/firmware, and /sys/fs/selinux**, **/sys/devices/virtual/powercap**.  The default paths that are read-only are **/proc/asound**, **/proc/bus**, **/proc/fs**, **/proc/irq**, **/proc/sys**, **/proc/sysrq-trigger**, **/sys/fs/cgroup**.
 
 **--shm-size**=""
 
@@ -690,8 +962,10 @@ Skip stages in multi-stage builds which don't affect the target stage. (Default 
 
 **--squash**
 
-Squash all of the image's new layers into a single new layer; any preexisting layers
-are not squashed.
+Squash all layers, including those from base image(s), into one single layer. (Default is false).
+
+By default, Buildah preserves existing base-image layers and adds only one new layer on a build.
+The --layers option can be used to preserve intermediate build layers.
 
 **--ssh**=**default**|*id[=socket>|<key>[,<key>]*
 
@@ -714,6 +988,13 @@ Specifies the name which will be assigned to the resulting image if the build
 process completes successfully.
 If _imageName_ does not include a registry name component, the registry name *localhost* will be prepended to the image name.
 
+The **--tag** option supports all transports from `containers-transports(5)`.
+If no transport is specified, the `containers-storage` (i.e., local storage) transport is used.
+
+  __buildah build --tag=oci-archive:./foo.ociarchive .__
+
+  __buildah build -t quay.io/username/foo  .__
+
 **--target** *stageName*
 
 Set the target build stage to build.  When building a Containerfile with multiple build stages, --target
@@ -729,7 +1010,7 @@ When --timestamp is set, the created timestamp is always set to the time specifi
 
 **--tls-verify** *bool-value*
 
-Require HTTPS and verification of certificates when talking to container registries (defaults to true).  TLS verification cannot be used when talking to an insecure registry.
+Require HTTPS and verification of certificates when talking to container registries (defaults to true) and retrieving content from HTTPS locations for ADD instructions.  TLS verification cannot be used when talking to an insecure registry.
 
 **--ulimit** *type*=*soft-limit*[:*hard-limit*]
 
@@ -757,6 +1038,10 @@ include:
 **--unsetenv** *env*
 
 Unset environment variables from the final image.
+
+**--unsetlabel** *label*
+
+Unset the image label, causing the label not to be inherited from the base image.
 
 **--userns** *how*
 
@@ -860,12 +1145,11 @@ Set the architecture variant of the image to be pulled.
 
 Mount a host directory into containers when executing *RUN* instructions during
 the build.  The `OPTIONS` are a comma delimited list and can be:
-<sup>[[1]](#Footnote1)</sup>
 
    * [rw|ro]
    * [U]
    * [z|Z|O]
-   * [`[r]shared`|`[r]slave`|`[r]private`]
+   * [`[r]shared`|`[r]slave`|`[r]private`] <sup>[[1]](#Footnote1)</sup>
 
 The `CONTAINER-DIR` must be an absolute path such as `/src/docs`. The `HOST-DIR`
 must be an absolute path as well. Buildah bind-mounts the `HOST-DIR` to the
@@ -913,9 +1197,9 @@ Only the current container can use a private volume.
 
   Note:
 
-     - The `O` flag is not allowed to be specified with the `Z` or `z` flags. Content mounted into the container is labeled with the private label.
+ - The `O` flag is not allowed to be specified with the `Z` or `z` flags. Content mounted into the container is labeled with the private label.
        On SELinux systems, labels in the source directory must be readable by the container label. If not, SELinux container separation must be disabled for the container to work.
-     - Modification of the directory volume mounted into the container with an overlay mount can cause unexpected failures.  It is recommended that you do not modify the directory until the container finishes running.
+ - Modification of the directory volume mounted into the container with an overlay mount can cause unexpected failures.  It is recommended that you do not modify the directory until the container finishes running.
 
 By default bind mounted volumes are `private`. That means any mounts done
 inside container will not be visible on the host and vice versa. This behavior can
@@ -1039,7 +1323,7 @@ buildah build --arch s390x --manifest myimage /tmp/mysrc
 
 buildah bud --platform linux/s390x,linux/ppc64le,linux/amd64 --manifest myimage /tmp/mysrc
 
-buildah bud --platform linux/arm64 --platform linux/amd64 --manifest myimage /tmp/mysrc
+buildah build --platform linux/arm64 --platform linux/amd64 --manifest myimage /tmp/mysrc
 
 buildah bud --all-platforms --manifest myimage /tmp/mysrc
 
@@ -1057,7 +1341,7 @@ buildah build -o - . > out.tar
 
   This will clone the specified GitHub repository from the URL and use it as context. The Containerfile or Dockerfile at the root of the repository is used as the context of the build. This only works if the GitHub repository is a dedicated repository.
 
-  buildah build https://github.com/scollier/purpletest
+  buildah build https://github.com/containers/PodmanHello.git
 
   Note: Github does not support using `git://` for performing `clone` operation due to recent changes in their security guidance (https://github.blog/2021-09-01-improving-git-protocol-security-github/). Use an `https://` URL if the source repository is hosted on Github.
 
@@ -1104,7 +1388,7 @@ Users can specify a series of Unix shell globals in a
 .containerignore/.dockerignore file to identify files/directories to exclude.
 
 Buildah supports a special wildcard string `**` which matches any number of
-directories (including zero). For example, **/*.go will exclude all files that
+directories (including zero). For example, `**/*.go` will exclude all files that
 end with .go that are found in all directories.
 
 Example .containerignore file:
@@ -1137,7 +1421,7 @@ Exclude all doc files except Help.doc from the image.
 
 This functionality is compatible with the handling of .containerignore files described here:
 
-https://github.com/containers/buildah/blob/main/docs/containerignore.5.md
+https://github.com/containers/common/blob/main/docs/containerignore.5.md
 
 **registries.conf** (`/etc/containers/registries.conf`)
 
@@ -1148,7 +1432,7 @@ registries.conf is the configuration file which specifies which container regist
 Signature policy file.  This defines the trust policy for container images.  Controls which container registries can be used for image, and whether or not the tool should trust the images.
 
 ## SEE ALSO
-buildah(1), cpp(1), buildah-login(1), docker-login(1), namespaces(7), pid\_namespaces(7), containers-policy.json(5), containers-registries.conf(5), user\_namespaces(7), crun(1), runc(8)
+buildah(1), cpp(1), buildah-login(1), docker-login(1), namespaces(7), pid\_namespaces(7), containers-policy.json(5), containers-registries.conf(5), user\_namespaces(7), crun(1), runc(8), containers.conf(5), oci-hooks(5), containers-transports(5), containers-auth.json(5)
 
 ## FOOTNOTES
 <a name="Footnote1">1</a>: The Buildah project is committed to inclusivity, a core value of open source. The `master` and `slave` mount propagation terminology used here is problematic and divisive, and should be changed. However, these terms are currently used within the Linux kernel and must be used as-is at this time. When the kernel maintainers rectify this usage, Buildah will follow suit immediately.

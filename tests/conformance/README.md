@@ -15,17 +15,28 @@ Conformance tests use Docker CE to build images to be compared with images built
 
 ## Run conformance tests
 
-You can run all of the tests with go test:
+These are the base images used by various conformance tests:
 ```
-go test -v -tags "$(./btrfs_tag.sh) $(./btrfs_installed_tag.sh) $(./libdm_tag.sh)" ./tests/conformance
+bash
+docker pull mirror.gcr.io/alpine
+docker pull mirror.gcr.io/busybox
+docker pull quay.io/libpod/centos:7
+docker pull registry.fedoraproject.org/fedora-minimal:41-aarch64
+docker pull registry.fedoraproject.org/fedora-minimal:41-amd64
+docker pull registry.fedoraproject.org/fedora-minimal
+```
+
+You can run all of the tests with go test (and under `buildah unshare` or `podman unshare` if you're not root):
+```
+go test -v -timeout=30m -tags "$(./btrfs_tag.sh) $(./btrfs_installed_tag.sh)" ./tests/conformance
 ```
 
 If you want to run one of the test cases you can use the "-run" flag:
 ```
-go test -v -tags "$(./btrfs_tag.sh) $(./btrfs_installed_tag.sh) $(./libdm_tag.sh)" -run TestConformance/shell ./tests/conformance
+go test -v -timeout=30m -tags "$(./btrfs_tag.sh) $(./btrfs_installed_tag.sh)" -run TestConformance/shell ./tests/conformance
 ```
 
 If you also want to build and compare on a line-by-line basis, run:
 ```
-go test -v -timeout=60m -tags "$(./btrfs_tag.sh) $(./btrfs_installed_tag.sh) $(./libdm_tag.sh)" ./tests/conformance -compare-layers
+go test -v -timeout=60m -tags "$(./btrfs_tag.sh) $(./btrfs_installed_tag.sh)" ./tests/conformance -compare-layers
 ```

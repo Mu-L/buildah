@@ -8,13 +8,31 @@ set -e
 # expectation mismatch.
 source $(dirname $0)/lib.sh
 
-req_env_vars OS_RELEASE_ID OS_RELEASE_VER GOSRC IN_PODMAN_IMAGE
+req_env_vars OS_RELEASE_ID OS_RELEASE_VER GOSRC IN_PODMAN_IMAGE CIRRUS_CHANGE_TITLE
+
+msg "Running df."
+df -hT
 
 msg "Disabling git repository owner-check system-wide."
 # Newer versions of git bark if repo. files are unexpectedly owned.
 # This mainly affects rootless and containerized testing.  But
 # the testing environment is disposable, so we don't care.=
 git config --system --add safe.directory $GOSRC
+
+# Support optional/draft testing using latest/greatest
+# podman-next COPR packages.  This requires a draft PR
+# to ensure changes also pass CI w/o package updates.
+if [[ "$OS_RELEASE_ID" =~ "fedora" ]] && \
+   [[ "$CIRRUS_CHANGE_TITLE" =~ CI:NEXT ]]
+then
+    # shellcheck disable=SC2154
+    if [[ "$CIRRUS_PR_DRAFT" != "true" ]]; then
+        die "Magic 'CI:NEXT' string can only be used on DRAFT PRs"
+    fi
+
+    showrun dnf copr enable rhcontainerbot/podman-next -y
+    showrun dnf upgrade -y
+fi
 
 msg "Setting up $OS_RELEASE_ID $OS_RELEASE_VER"
 cd $GOSRC
@@ -32,21 +50,12 @@ EOF
             showrun setsebool -P container_manage_cgroup true
         fi
         ;;
-    ubuntu)
+    debian)
         if [[ "$1" == "conformance" ]]; then
-            msg "Installing previously downloaded/cached packages"
-            ooe.sh dpkg -i \
+            msg "Installing previously downloaded/cached Docker packages"
+            dpkg -i \
                 $PACKAGE_DOWNLOAD_DIR/containerd.io*.deb \
                 $PACKAGE_DOWNLOAD_DIR/docker-ce*.deb
-
-            # At the time of this comment, Ubuntu is using systemd-resolved
-            # which interfears badly with conformance testing.  Some tests
-            # need to run dnsmasq on port 53.
-            if [[ -r "/run/systemd/resolve/resolv.conf" ]]; then
-                msg "Disabling systemd-resolved service"
-                systemctl stop systemd-resolved.service
-                cp /run/systemd/resolve/resolv.conf /etc/
-            fi
         fi
         ;;
     *)
@@ -77,6 +86,18 @@ source $(dirname $0)/lib.sh
 echo "Configuring /etc/containers/registries.conf"
 mkdir -p /etc/containers
 echo -e "[registries.search]\nregistries = ['docker.io', 'registry.fedoraproject.org', 'quay.io']" | tee /etc/containers/registries.conf
+
+# As of July 2024, CI VMs come built-in with a registry.
+LCR=/var/cache/local-registry/local-cache-registry
+if [[ -x $LCR ]]; then
+    # Images in cache registry are prepopulated at the time
+    # VMs are built. If any PR adds a dependency on new images,
+    # those must be fetched now, at VM start time. This should
+    # be rare, and must be fixed in next automation_images build.
+    while read new_image; do
+        $LCR cache $new_image
+    done < <(grep '^[^#]' tests/NEW-IMAGES || true)
+fi
 
 show_env_vars
 

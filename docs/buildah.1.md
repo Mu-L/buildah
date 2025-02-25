@@ -78,7 +78,7 @@ defaults is most often preferred.
 
 Storage driver.  The default storage driver for UID 0 is configured in /etc/containers/storage.conf (`$HOME/.config/containers/storage.conf` in rootless mode), and is *vfs* for other users.  The `STORAGE_DRIVER` environment variable overrides the default.  The --storage-driver specified driver overrides all.
 
-Examples: "overlay", "devicemapper", "vfs"
+Examples: "overlay", "vfs"
 
 Overriding this option will cause the *storage-opt* settings in /etc/containers/storage.conf to be ignored.  The user must
 specify additional options via the `--storage-opt` flag.
@@ -158,7 +158,9 @@ Buildah can set up environment variables from the env entry in the [engine] tabl
 | login      | [buildah-login(1)](buildah-login.1.md)           | Login to a container registry.                                                                       |
 | logout     | [buildah-logout(1)](buildah-logout.1.md)         | Logout of a container registry                                                                       |
 | manifest   | [buildah-manifest(1)](buildah-manifest.1.md)     | Create and manipulate manifest lists and image indexes.                                              |
+| mkcw       | [buildah-mkcw(1)](buildah-mkcw.1.md)             | Convert a conventional container image into a confidential workload image.
 | mount      | [buildah-mount(1)](buildah-mount.1.md)           | Mount the working container's root filesystem.                                                       |
+| prune      | [buildah-prune(1)](buildah-prune.1.md)           | Cleanup intermediate images as well as build and mount cache.                                        |
 | pull       | [buildah-pull(1)](buildah-pull.1.md)             | Pull an image from the specified location.                                                           |
 | push       | [buildah-push(1)](buildah-push.1.md)             | Push an image from local storage to elsewhere.                                                       |
 | rename     | [buildah-rename(1)](buildah-rename.1.md)         | Rename a local container.                                                                            |

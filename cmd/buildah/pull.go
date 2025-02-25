@@ -9,8 +9,7 @@ import (
 
 	"github.com/containers/buildah"
 	"github.com/containers/buildah/define"
-	"github.com/containers/buildah/internal/util"
-	buildahcli "github.com/containers/buildah/pkg/cli"
+	"github.com/containers/buildah/pkg/cli"
 	"github.com/containers/buildah/pkg/parse"
 	"github.com/containers/common/pkg/auth"
 	"github.com/sirupsen/logrus"
@@ -62,7 +61,7 @@ func init() {
 	flags.StringVar(&opts.blobCache, "blob-cache", "", "store copies of pulled image blobs in the specified directory")
 	flags.StringVar(&opts.certDir, "cert-dir", "", "use certificates at the specified path to access the registry")
 	flags.StringVar(&opts.creds, "creds", "", "use `[username[:password]]` for accessing the registry")
-	flags.StringVar(&opts.pullPolicy, "policy", "missing", "missing, always, or never.")
+	flags.StringVar(&opts.pullPolicy, "policy", "missing", "missing, always, ifnewer, or never.")
 	flags.BoolVarP(&opts.removeSignatures, "remove-signatures", "", false, "don't copy signatures when pulling image")
 	flags.StringVar(&opts.signaturePolicy, "signature-policy", "", "`pathname` of signature policy file (not usually used)")
 	flags.StringSliceVar(&opts.decryptionKeys, "decryption-key", nil, "key needed to decrypt the image")
@@ -75,8 +74,8 @@ func init() {
 	flags.StringSlice("platform", []string{parse.DefaultPlatform()}, "prefer OS/ARCH instead of the current operating system and architecture for choosing images")
 	flags.String("variant", "", "override the `variant` of the specified image")
 	flags.BoolVar(&opts.tlsVerify, "tls-verify", true, "require HTTPS and verify certificates when accessing the registry. TLS verification cannot be used when talking to an insecure registry.")
-	flags.IntVar(&opts.retry, "retry", buildahcli.MaxPullPushRetries, "number of times to retry in case of failure when performing pull")
-	flags.StringVar(&opts.retryDelay, "retry-delay", buildahcli.PullPushRetryDelay.String(), "delay between retries in case of pull failures")
+	flags.IntVar(&opts.retry, "retry", int(defaultContainerConfig.Engine.Retry), "number of times to retry in case of failure when performing pull")
+	flags.StringVar(&opts.retryDelay, "retry-delay", defaultContainerConfig.Engine.RetryDelay, "delay between retries in case of pull failures")
 	if err := flags.MarkHidden("blob-cache"); err != nil {
 		panic(fmt.Sprintf("error marking blob-cache as hidden: %v", err))
 	}
@@ -88,7 +87,7 @@ func pullCmd(c *cobra.Command, args []string, iopts pullOptions) error {
 	if len(args) == 0 {
 		return errors.New("an image name must be specified")
 	}
-	if err := buildahcli.VerifyFlagsArgsOrder(args); err != nil {
+	if err := cli.VerifyFlagsArgsOrder(args); err != nil {
 		return err
 	}
 	if len(args) > 1 {
@@ -115,7 +114,7 @@ func pullCmd(c *cobra.Command, args []string, iopts pullOptions) error {
 		return err
 	}
 
-	decConfig, err := util.DecryptConfig(iopts.decryptionKeys)
+	decConfig, err := cli.DecryptConfig(iopts.decryptionKeys)
 	if err != nil {
 		return fmt.Errorf("unable to obtain decryption config: %w", err)
 	}
@@ -123,11 +122,6 @@ func pullCmd(c *cobra.Command, args []string, iopts pullOptions) error {
 	policy, ok := define.PolicyMap[iopts.pullPolicy]
 	if !ok {
 		return fmt.Errorf("unsupported pull policy %q", iopts.pullPolicy)
-	}
-	var pullPushRetryDelay time.Duration
-	pullPushRetryDelay, err = time.ParseDuration(iopts.retryDelay)
-	if err != nil {
-		return fmt.Errorf("unable to parse value provided %q as --retry-delay: %w", iopts.retryDelay, err)
 	}
 	options := buildah.PullOptions{
 		SignaturePolicyPath: iopts.signaturePolicy,
@@ -138,9 +132,15 @@ func pullCmd(c *cobra.Command, args []string, iopts pullOptions) error {
 		ReportWriter:        os.Stderr,
 		RemoveSignatures:    iopts.removeSignatures,
 		MaxRetries:          iopts.retry,
-		RetryDelay:          pullPushRetryDelay,
 		OciDecryptConfig:    decConfig,
 		PullPolicy:          policy,
+	}
+
+	if iopts.retryDelay != "" {
+		options.RetryDelay, err = time.ParseDuration(iopts.retryDelay)
+		if err != nil {
+			return fmt.Errorf("unable to parse value provided %q as --retry-delay: %w", iopts.retryDelay, err)
+		}
 	}
 
 	if iopts.quiet {
