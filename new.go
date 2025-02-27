@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
+	"slices"
 	"strings"
 
 	"github.com/containers/buildah/define"
@@ -140,7 +142,7 @@ func newBuilder(ctx context.Context, store storage.Store, options BuilderOptions
 
 	systemContext := getSystemContext(store, options.SystemContext, options.SignaturePolicyPath)
 
-	if options.FromImage != "" && options.FromImage != "scratch" {
+	if options.FromImage != "" && options.FromImage != BaseImageFakeName {
 		imageRuntime, err := libimage.RuntimeFromStore(store, &libimage.RuntimeOptions{SystemContext: systemContext})
 		if err != nil {
 			return nil, err
@@ -239,9 +241,8 @@ func newBuilder(ctx context.Context, store storage.Store, options BuilderOptions
 		tmpName = findUnusedContainer(tmpName, containers)
 	}
 
-	conflict := 100
+	suffixDigitsModulo := 100
 	for {
-
 		var flags map[string]interface{}
 		// check if we have predefined ProcessLabel and MountLabel
 		// this could be true if this is another stage in a build
@@ -265,8 +266,10 @@ func newBuilder(ctx context.Context, store storage.Store, options BuilderOptions
 		if !errors.Is(err, storage.ErrDuplicateName) || options.Container != "" {
 			return nil, fmt.Errorf("creating container: %w", err)
 		}
-		tmpName = fmt.Sprintf("%s-%d", name, rand.Int()%conflict)
-		conflict = conflict * 10
+		tmpName = fmt.Sprintf("%s-%d", name, rand.Int()%suffixDigitsModulo)
+		if suffixDigitsModulo < 1_000_000_000 {
+			suffixDigitsModulo *= 10
+		}
 	}
 	defer func() {
 		if err != nil {
@@ -286,24 +289,16 @@ func newBuilder(ctx context.Context, store storage.Store, options BuilderOptions
 	namespaceOptions := defaultNamespaceOptions
 	namespaceOptions.AddOrReplace(options.NamespaceOptions...)
 
-	// Set the base-image annotations as suggested by the OCI image spec.
-	imageAnnotations := map[string]string{}
-	imageAnnotations[v1.AnnotationBaseImageDigest] = imageDigest
-	if !shortnames.IsShortName(imageSpec) {
-		// If the base image could be resolved to a fully-qualified
-		// image name, let's set it.
-		imageAnnotations[v1.AnnotationBaseImageName] = imageSpec
-	}
-
 	builder := &Builder{
 		store:                 store,
 		Type:                  containerType,
 		FromImage:             imageSpec,
 		FromImageID:           imageID,
 		FromImageDigest:       imageDigest,
+		GroupAdd:              options.GroupAdd,
 		Container:             name,
 		ContainerID:           container.ID,
-		ImageAnnotations:      imageAnnotations,
+		ImageAnnotations:      map[string]string{},
 		ImageCreatedBy:        "",
 		ProcessLabel:          container.ProcessLabel(),
 		MountLabel:            container.MountLabel(),
@@ -319,15 +314,17 @@ func newBuilder(ctx context.Context, store storage.Store, options BuilderOptions
 			UIDMap:         uidmap,
 			GIDMap:         gidmap,
 		},
-		Capabilities:     copyStringSlice(options.Capabilities),
+		Capabilities:     slices.Clone(options.Capabilities),
 		CommonBuildOpts:  options.CommonBuildOpts,
 		TopLayer:         topLayer,
-		Args:             copyStringStringMap(options.Args),
+		Args:             maps.Clone(options.Args),
 		Format:           options.Format,
 		TempVolumes:      map[string]bool{},
 		Devices:          options.Devices,
+		DeviceSpecs:      options.DeviceSpecs,
 		Logger:           options.Logger,
 		NetworkInterface: options.NetworkInterface,
+		CDIConfigDir:     options.CDIConfigDir,
 	}
 
 	if options.Mount {
@@ -337,9 +334,21 @@ func newBuilder(ctx context.Context, store storage.Store, options BuilderOptions
 		}
 	}
 
-	if err := builder.initConfig(ctx, src, systemContext); err != nil {
+	if err := builder.initConfig(ctx, systemContext, src, &options); err != nil {
 		return nil, fmt.Errorf("preparing image configuration: %w", err)
 	}
+
+	if !options.PreserveBaseImageAnns {
+		builder.SetAnnotation(v1.AnnotationBaseImageDigest, imageDigest)
+		if !shortnames.IsShortName(imageSpec) {
+			// If the base image was specified as a fully-qualified
+			// image name, let's set it.
+			builder.SetAnnotation(v1.AnnotationBaseImageName, imageSpec)
+		} else {
+			builder.UnsetAnnotation(v1.AnnotationBaseImageName)
+		}
+	}
+
 	err = builder.Save()
 	if err != nil {
 		return nil, fmt.Errorf("saving builder state for container %q: %w", builder.ContainerID, err)

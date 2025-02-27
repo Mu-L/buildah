@@ -7,6 +7,7 @@ import (
 )
 
 func TestDiscoverContainerfile(t *testing.T) {
+	t.Parallel()
 	_, err := DiscoverContainerfile("./bogus")
 	assert.NotNil(t, err)
 
@@ -28,5 +29,4 @@ func TestDiscoverContainerfile(t *testing.T) {
 	name, err = DiscoverContainerfile("test/test2")
 	assert.Nil(t, err)
 	assert.Equal(t, name, "test/test2/Dockerfile")
-
 }

@@ -2,6 +2,12 @@
 
 load helpers
 
+# The 'rm cachefile' in the "blobs must be reused" test
+# causes flakes when parallelizing
+function setup_file() {
+    export BATS_NO_PARALLELIZE_WITHIN_FILE=true
+}
+
 @test "blobcache-pull" {
 	blobcachedir=${TEST_SCRATCH_DIR}/cache
 	mkdir -p ${blobcachedir}
@@ -53,6 +59,43 @@ function _check_matches() {
 
         expect_output --from="$matched"   "$3"  "$4 should match"
         expect_output --from="$unmatched" "$5"  "$6 should not match"
+}
+
+# Integration test for https://github.com/containers/image/pull/1645
+@test "blobcache: blobs must be reused when pushing across registry" {
+	blobcachedir=${TEST_SCRATCH_DIR}/cachereuse
+	mkdir -p ${blobcachedir}
+	start_registry
+
+	imgname=blobimg-$(random_string | tr A-Z a-z)
+	run_buildah login --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth --username testuser --password testpassword localhost:${REGISTRY_PORT}
+	outputdir=${TEST_SCRATCH_DIR}/outputdir
+	mkdir -p ${outputdir}
+	podman run --rm --mount type=bind,src=${TEST_SCRATCH_DIR}/test.auth,target=/test.auth,Z --mount type=bind,src=${outputdir},target=/output,Z --net host quay.io/skopeo/stable copy --preserve-digests --authfile=/test.auth --tls-verify=false docker://registry.fedoraproject.org/fedora-minimal dir:/output
+	run_buildah rmi --all -f
+	run_buildah pull --blob-cache=${blobcachedir} dir:${outputdir}
+	run_buildah images -a --format '{{.ID}}'
+	cid=$output
+	run_buildah --log-level debug push --blob-cache=${blobcachedir} --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth $cid docker://localhost:${REGISTRY_PORT}/$imgname
+	# must not contain "Skipping blob" since push must happen
+	assert "$output" !~ "Skipping blob"
+
+	# Clear local image and c/image's blob-info-cache
+	run_buildah rmi --all -f
+	cachedir=/var/lib
+	if is_rootless;
+	then
+		cachedir=$HOME/.local/share
+	fi
+	run rm -rf $blobcachedir/*
+	assert "$status" -eq 0 "status of `run rm $cachefile` must be 0"
+
+	# In first push blob must be skipped after vendoring https://github.com/containers/image/pull/1645
+	run_buildah pull dir:${outputdir}
+	run_buildah images -a --format '{{.ID}}'
+	cid=$output
+	run_buildah --log-level debug push --blob-cache=${blobcachedir} --tls-verify=false --authfile ${TEST_SCRATCH_DIR}/test.auth $cid docker://localhost:${REGISTRY_PORT}/$imgname
+	expect_output --substring "Skipping blob"
 }
 
 @test "blobcache-commit" {

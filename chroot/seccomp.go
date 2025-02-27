@@ -1,17 +1,18 @@
 //go:build linux && seccomp
-// +build linux,seccomp
 
 package chroot
 
 import (
 	"fmt"
-	"io/ioutil"
+	"os"
 
 	"github.com/containers/common/pkg/seccomp"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	libseccomp "github.com/seccomp/libseccomp-golang"
 	"github.com/sirupsen/logrus"
 )
+
+const seccompAvailable = true
 
 // setSeccomp sets the seccomp filter for ourselves and any processes that we'll start.
 func setSeccomp(spec *specs.Spec) error {
@@ -79,9 +80,11 @@ func setSeccomp(spec *specs.Spec) error {
 		case specs.ArchS390X:
 			return libseccomp.ArchS390X
 		case specs.ArchPARISC:
-			/* fallthrough */ /* for now */
+			return libseccomp.ArchPARISC
 		case specs.ArchPARISC64:
-			/* fallthrough */ /* for now */
+			return libseccomp.ArchPARISC64
+		case specs.ArchRISCV64:
+			return libseccomp.ArchRISCV64
 		default:
 			logrus.Errorf("unmappable arch %v", specArch)
 		}
@@ -187,7 +190,7 @@ func setupSeccomp(spec *specs.Spec, seccompProfilePath string) error {
 		}
 		spec.Linux.Seccomp = seccompConfig
 	default:
-		seccompProfile, err := ioutil.ReadFile(seccompProfilePath)
+		seccompProfile, err := os.ReadFile(seccompProfilePath)
 		if err != nil {
 			return fmt.Errorf("opening seccomp profile failed: %w", err)
 		}

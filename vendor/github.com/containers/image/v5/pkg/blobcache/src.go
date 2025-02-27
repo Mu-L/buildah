@@ -4,15 +4,16 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sync"
 
 	"github.com/containers/image/v5/internal/image"
 	"github.com/containers/image/v5/internal/imagesource"
 	"github.com/containers/image/v5/internal/imagesource/impl"
+	"github.com/containers/image/v5/internal/manifest"
 	"github.com/containers/image/v5/internal/private"
 	"github.com/containers/image/v5/internal/signature"
-	"github.com/containers/image/v5/manifest"
 	"github.com/containers/image/v5/pkg/compression"
 	"github.com/containers/image/v5/transports"
 	"github.com/containers/image/v5/types"
@@ -56,7 +57,10 @@ func (s *blobCacheSource) Close() error {
 
 func (s *blobCacheSource) GetManifest(ctx context.Context, instanceDigest *digest.Digest) ([]byte, string, error) {
 	if instanceDigest != nil {
-		filename := s.reference.blobPath(*instanceDigest, false)
+		filename, err := s.reference.blobPath(*instanceDigest, false)
+		if err != nil {
+			return nil, "", err
+		}
 		manifestBytes, err := os.ReadFile(filename)
 		if err == nil {
 			s.cacheHits++
@@ -113,6 +117,63 @@ func (s *blobCacheSource) GetSignaturesWithFormat(ctx context.Context, instanceD
 	return s.source.GetSignaturesWithFormat(ctx, instanceDigest)
 }
 
+// layerInfoForCopy returns a possibly-updated version of info for LayerInfosForCopy
+func (s *blobCacheSource) layerInfoForCopy(info types.BlobInfo) (types.BlobInfo, error) {
+	var replaceDigestBytes []byte
+	blobFile, err := s.reference.blobPath(info.Digest, false)
+	if err != nil {
+		return types.BlobInfo{}, err
+	}
+	switch s.reference.compress {
+	case types.Compress:
+		replaceDigestBytes, err = os.ReadFile(blobFile + compressedNote)
+	case types.Decompress:
+		replaceDigestBytes, err = os.ReadFile(blobFile + decompressedNote)
+	}
+	if err != nil {
+		return info, nil
+	}
+	replaceDigest, err := digest.Parse(string(replaceDigestBytes))
+	if err != nil {
+		return info, nil
+	}
+	alternate, err := s.reference.blobPath(replaceDigest, false)
+	if err != nil {
+		return types.BlobInfo{}, err
+	}
+	fileInfo, err := os.Stat(alternate)
+	if err != nil {
+		return info, nil
+	}
+
+	switch info.MediaType {
+	case v1.MediaTypeImageLayer, v1.MediaTypeImageLayerGzip:
+		switch s.reference.compress {
+		case types.Compress:
+			info.MediaType = v1.MediaTypeImageLayerGzip
+			info.CompressionAlgorithm = &compression.Gzip
+		case types.Decompress: // FIXME: This should remove zstd:chunked annotations (but those annotations being left with incorrect values should not break pulls)
+			info.MediaType = v1.MediaTypeImageLayer
+			info.CompressionAlgorithm = nil
+		}
+	case manifest.DockerV2SchemaLayerMediaTypeUncompressed, manifest.DockerV2Schema2LayerMediaType:
+		switch s.reference.compress {
+		case types.Compress:
+			info.MediaType = manifest.DockerV2Schema2LayerMediaType
+			info.CompressionAlgorithm = &compression.Gzip
+		case types.Decompress:
+			// nope, not going to suggest anything, it's not allowed by the spec
+			return info, nil
+		}
+	}
+	logrus.Debugf("suggesting cached blob with digest %q, type %q, and compression %v in place of blob with digest %q", replaceDigest.String(), info.MediaType, s.reference.compress, info.Digest.String())
+	info.CompressionOperation = s.reference.compress
+	info.Digest = replaceDigest
+	info.Size = fileInfo.Size()
+	logrus.Debugf("info = %#v", info)
+	return info, nil
+}
+
 func (s *blobCacheSource) LayerInfosForCopy(ctx context.Context, instanceDigest *digest.Digest) ([]types.BlobInfo, error) {
 	signatures, err := s.source.GetSignaturesWithFormat(ctx, instanceDigest)
 	if err != nil {
@@ -135,49 +196,9 @@ func (s *blobCacheSource) LayerInfosForCopy(ctx context.Context, instanceDigest 
 	if canReplaceBlobs && s.reference.compress != types.PreserveOriginal {
 		replacedInfos := make([]types.BlobInfo, 0, len(infos))
 		for _, info := range infos {
-			var replaceDigest []byte
-			var err error
-			blobFile := s.reference.blobPath(info.Digest, false)
-			var alternate string
-			switch s.reference.compress {
-			case types.Compress:
-				alternate = blobFile + compressedNote
-				replaceDigest, err = os.ReadFile(alternate)
-			case types.Decompress:
-				alternate = blobFile + decompressedNote
-				replaceDigest, err = os.ReadFile(alternate)
-			}
-			if err == nil && digest.Digest(replaceDigest).Validate() == nil {
-				alternate = s.reference.blobPath(digest.Digest(replaceDigest), false)
-				fileInfo, err := os.Stat(alternate)
-				if err == nil {
-					switch info.MediaType {
-					case v1.MediaTypeImageLayer, v1.MediaTypeImageLayerGzip:
-						switch s.reference.compress {
-						case types.Compress:
-							info.MediaType = v1.MediaTypeImageLayerGzip
-							info.CompressionAlgorithm = &compression.Gzip
-						case types.Decompress:
-							info.MediaType = v1.MediaTypeImageLayer
-							info.CompressionAlgorithm = nil
-						}
-					case manifest.DockerV2SchemaLayerMediaTypeUncompressed, manifest.DockerV2Schema2LayerMediaType:
-						switch s.reference.compress {
-						case types.Compress:
-							info.MediaType = manifest.DockerV2Schema2LayerMediaType
-							info.CompressionAlgorithm = &compression.Gzip
-						case types.Decompress:
-							// nope, not going to suggest anything, it's not allowed by the spec
-							replacedInfos = append(replacedInfos, info)
-							continue
-						}
-					}
-					logrus.Debugf("suggesting cached blob with digest %q, type %q, and compression %v in place of blob with digest %q", string(replaceDigest), info.MediaType, s.reference.compress, info.Digest.String())
-					info.CompressionOperation = s.reference.compress
-					info.Digest = digest.Digest(replaceDigest)
-					info.Size = fileInfo.Size()
-					logrus.Debugf("info = %#v", info)
-				}
+			info, err = s.layerInfoForCopy(info)
+			if err != nil {
+				return nil, err
 			}
 			replacedInfos = append(replacedInfos, info)
 		}
@@ -200,15 +221,21 @@ func streamChunksFromFile(streams chan io.ReadCloser, errs chan error, file io.R
 	defer file.Close()
 
 	for _, c := range chunks {
-		// Always seek to the desired offest; that way we don’t need to care about the consumer
+		// Always seek to the desired offset; that way we don’t need to care about the consumer
 		// not reading all of the chunk, or about the position going backwards.
 		if _, err := file.Seek(int64(c.Offset), io.SeekStart); err != nil {
 			errs <- err
 			break
 		}
+		var stream io.Reader
+		if c.Length != math.MaxUint64 {
+			stream = io.LimitReader(file, int64(c.Length))
+		} else {
+			stream = file
+		}
 		s := signalCloseReader{
-			closed: make(chan interface{}),
-			stream: io.LimitReader(file, int64(c.Length)),
+			closed: make(chan struct{}),
+			stream: stream,
 		}
 		streams <- s
 
@@ -218,7 +245,7 @@ func streamChunksFromFile(streams chan io.ReadCloser, errs chan error, file io.R
 }
 
 type signalCloseReader struct {
-	closed chan interface{}
+	closed chan struct{}
 	stream io.Reader
 }
 
@@ -236,6 +263,8 @@ func (s signalCloseReader) Close() error {
 // The specified chunks must be not overlapping and sorted by their offset.
 // The readers must be fully consumed, in the order they are returned, before blocking
 // to read the next chunk.
+// If the Length for the last chunk is set to math.MaxUint64, then it
+// fully fetches the remaining data from the offset to the end of the blob.
 func (s *blobCacheSource) GetBlobAt(ctx context.Context, info types.BlobInfo, chunks []private.ImageSourceChunk) (chan io.ReadCloser, chan error, error) {
 	blobPath, _, _, err := s.reference.findBlob(info)
 	if err != nil {

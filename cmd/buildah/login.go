@@ -39,10 +39,11 @@ func init() {
 	loginCommand.SetUsageTemplate(UsageTemplate())
 
 	flags := loginCommand.Flags()
-	flags.SetInterspersed(false)
 	flags.BoolVar(&opts.tlsVerify, "tls-verify", true, "require HTTPS and verify certificates when accessing the registry. TLS verification cannot be used when talking to an insecure registry.")
 	flags.BoolVar(&opts.getLogin, "get-login", true, "return the current login user for the registry")
 	flags.AddFlagSet(auth.GetLoginFlags(&opts.loginOpts))
+	opts.loginOpts.Stdin = os.Stdin
+	opts.loginOpts.Stdout = os.Stdout
 	rootCmd.AddCommand(loginCommand)
 }
 
@@ -62,6 +63,10 @@ func loginCmd(c *cobra.Command, args []string, iopts *loginReply) error {
 	if err != nil {
 		return fmt.Errorf("building system context: %w", err)
 	}
+	// parse.SystemContextFromOptions may point this field to an auth.json or to a .docker/config.json;
+	// that’s fair enough for reads, but incorrect for writes (the two files have incompatible formats),
+	// and it interferes with the auth.Login’s own argument parsing.
+	systemContext.AuthFilePath = ""
 	ctx := getContext()
 	iopts.loginOpts.GetLoginSet = c.Flag("get-login").Changed
 	return auth.Login(ctx, systemContext, &iopts.loginOpts, args)

@@ -31,7 +31,7 @@ We can also see that there are also no containers by running:
 
 ## Examples
 
-The two examples that will be shown are relatively simple, but they illustrate how a command or a number of commands can be setup in a master image such that they will be added to a secondary container image that is created from it.  This is extremely useful if you need to setup an environment where your containers have 75% of the same content, but need a few individual tweaks.  This can be helpful in setting up an environment for maven or java development containers for instance.  In this way you can create a single Dockerfile with all the common setup steps as ONBUILD commands and then really minimize the buildah commands or instructions in a second Dockerfile that would be necessary to complete the creation of the container image.
+The two examples that will be shown are relatively simple, but they illustrate how a command or a number of commands can be setup in a primary image such that they will be added to a secondary container image that is created from it.  This is extremely useful if you need to setup an environment where your containers have 75% of the same content, but need a few individual tweaks.  This can be helpful in setting up an environment for maven or java development containers for instance.  In this way you can create a single Dockerfile with all the common setup steps as ONBUILD commands and then really minimize the buildah commands or instructions in a second Dockerfile that would be necessary to complete the creation of the container image.
 
 NOTE: In the examples below the option `--format=docker` is used in several places.  If you wanted to omit that, you could define the `BUILDAH_FORMAT` environment variable and set it to 'docker'.  On Fedora that command would be `export BUILDAH_FORMAT=docker`.
 
@@ -43,7 +43,7 @@ First create two Dockerfiles:
 
 ```
 $ cat << EOF > Dockerfile
-FROM fedora:latest
+FROM registry.fedoraproject.org/fedora:latest
 RUN touch /foo
 ONBUILD RUN touch /bar
 EOF
@@ -83,7 +83,7 @@ Instead of using a Dockerfile to create the onbuild-image, Buildah allows you to
 First a Fedora container will be created with `buildah from`, then the `/foo` file will be added with `buildah run`.  The `buildah config` command will configure ONBUILD to add `/bar` when a container image is created from the primary image, and finally the image will be saved with `buildah commit`.
 
 ```
-# buildah from --format=docker --name onbuild-container fedora:latest
+# buildah from --format=docker --name onbuild-container registry.fedoraproject.org/fedora:latest
 # buildah run onbuild-container touch /foo
 # buildah config --onbuild="RUN touch /bar" onbuild-container
 # buildah commit --format=docker onbuild-container onbuild-image
@@ -177,7 +177,7 @@ This is a new container pull ipbabble [ 8 ]
 This is a new container pull ipbabble [ 9 ]
 
 ```
-Again these aren't the most extensive examples, but they both illustrate how a master image can be setup and then a secondary container image can then be created with just a few steps.  This way the steps that are set up with the ONBUILD instructions don't have to be typed in each and every time that you need to setup your container.
+Again these aren't the most extensive examples, but they both illustrate how a primary image can be setup and then a secondary container image can then be created with just a few steps.  This way the steps that are set up with the ONBUILD instructions don't have to be typed in each and every time that you need to setup your container.
 
 ## Congratulations
 
@@ -188,6 +188,6 @@ If you have any suggestions or issues please post them at the [Buildah Issues pa
 For more information on Buildah and how you might contribute please visit the [Buildah home page on GitHub](https://github.com/containers/buildah).
 
 [Podman's site]: https://podman.io/
-[image specification]: https://github.com/opencontainers/runtime-spec
+[image specification]: https://github.com/opencontainers/image-spec/blob/main/spec.md
 [Introduction Tutorial]: 01-intro.md
 [Open Container Initiative]: https://www.opencontainers.org/

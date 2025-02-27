@@ -9,6 +9,7 @@ load helpers
     skip "skipping overlay test because \$STORAGE_DRIVER = $STORAGE_DRIVER"
   fi
   image=alpine
+  _prefetch $image
   mkdir ${TEST_SCRATCH_DIR}/lower
   touch ${TEST_SCRATCH_DIR}/lower/foo
 
@@ -28,7 +29,7 @@ load helpers
 
   # This should fail
   run ls ${TEST_SCRATCH_DIR}/lower/bar
-  [ "$status" -ne 0 ]
+  assert "$status" -ne 0 "status of ls ${TEST_SCRATCH_DIR}/lower/bar"
 }
 
 @test "overlay source permissions and owners" {
@@ -38,6 +39,7 @@ load helpers
     skip "skipping overlay test because \$STORAGE_DRIVER = $STORAGE_DRIVER"
   fi
   image=alpine
+  _prefetch $image
   mkdir -m 770 ${TEST_SCRATCH_DIR}/lower
   chown 1:1 ${TEST_SCRATCH_DIR}/lower
   permission=$(stat -c "%a %u %g" ${TEST_SCRATCH_DIR}/lower)
@@ -58,7 +60,7 @@ load helpers
 
   # This should fail since /tmp/test was an overlay, not a bind mount
   run ls ${TEST_SCRATCH_DIR}/lower/bar
-  [ "$status" -ne 0 ]
+  assert "$status" -ne 0 "status of ls ${TEST_SCRATCH_DIR}/lower/bar"
 }
 
 @test "overlay path contains colon" {
@@ -68,6 +70,7 @@ load helpers
     skip "skipping overlay test because \$STORAGE_DRIVER = $STORAGE_DRIVER"
   fi
   image=alpine
+  _prefetch $image
   mkdir ${TEST_SCRATCH_DIR}/a:lower
   touch ${TEST_SCRATCH_DIR}/a:lower/foo
 
@@ -92,5 +95,5 @@ load helpers
 
   # This should fail
   run ls ${TEST_SCRATCH_DIR}/a:lower/bar
-  [ "$status" -ne 0 ]
+  assert "$status" -ne 0 "status of ls ${TEST_SCRATCH_DIR}/a:lower/bar"
 }
