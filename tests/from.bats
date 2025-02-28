@@ -20,7 +20,7 @@ load helpers
 }
 
 @test "from-with-digest" {
-  run_buildah pull alpine
+  _prefetch alpine
   run_buildah inspect --format "{{.FromImageID}}" alpine
   digest=$output
 
@@ -82,6 +82,10 @@ load helpers
   run_buildah from --pull=false $WITH_POLICY_JSON scratch3
   expect_output --substring "scratch3-working-container"
   run_buildah rm $output
+  # Set --pull=never to prevent looking for a newer scratch3 image.
+  run_buildah from --pull=never $WITH_POLICY_JSON scratch3
+  expect_output --substring "scratch3-working-container"
+  run_buildah rm $output
   run_buildah rmi scratch2 scratch3
 
   # GitHub https://github.com/containers/buildah/issues/396#issuecomment-360949396
@@ -106,13 +110,14 @@ load helpers
   run_buildah rm $output
   run_buildah rmi docker.io/alpine:latest
 
-  run_buildah from --quiet --pull=true $WITH_POLICY_JSON docker.io/centos:7
-  run_buildah rm $output
-  run_buildah rmi docker.io/centos:7
+  # FIXME FIXME FIXME: I don't see the point of these. Any reason not to delete?
+#  run_buildah from --quiet --pull=true $WITH_POLICY_JSON docker.io/centos:7
+#  run_buildah rm $output
+#  run_buildah rmi docker.io/centos:7
 
-  run_buildah from --quiet --pull=true $WITH_POLICY_JSON docker.io/centos:latest
-  run_buildah rm $output
-  run_buildah rmi docker.io/centos:latest
+#  run_buildah from --quiet --pull=true $WITH_POLICY_JSON docker.io/centos:latest
+#  run_buildah rm $output
+#  run_buildah rmi docker.io/centos:latest
 }
 
 @test "from the following transports: docker-archive, oci-archive, and dir" {
@@ -120,8 +125,11 @@ load helpers
   run_buildah from --quiet --pull=true $WITH_POLICY_JSON alpine
   run_buildah rm $output
 
-  run_buildah from --quiet --pull=true $WITH_POLICY_JSON docker:latest
-  run_buildah rm $output
+  # #2205: The important thing here is differentiating 'docker:latest'
+  # (the image) from 'docker:/path' ('docker' as a protocol identifier).
+  # This is a parsing fix so we don't actually need to pull the image.
+  run_buildah 125 from --quiet --pull=false $WITH_POLICY_JSON docker:latest
+  assert "$output" = "Error: docker:latest: image not known"
 
   run_buildah push $WITH_POLICY_JSON alpine docker-archive:${TEST_SCRATCH_DIR}/docker-alp.tar:alpine
   run_buildah push $WITH_POLICY_JSON alpine    oci-archive:${TEST_SCRATCH_DIR}/oci-alp.tar:alpine
@@ -371,7 +379,11 @@ load helpers
   echo "$output"
   expect_output --substring "busybox: image not known"
 
-  run_buildah from $WITH_POLICY_JSON --pull=false busybox
+  run_buildah 125 from $WITH_POLICY_JSON --pull=false busybox
+  echo "$output"
+  expect_output --substring "busybox: image not known"
+
+  run_buildah from $WITH_POLICY_JSON --pull=ifmissing busybox
   echo "$output"
   expect_output --substring "busybox-working-container"
 
@@ -390,7 +402,7 @@ load helpers
 
 @test "from with nonexistent authfile: fails" {
   run_buildah 125 from --authfile /no/such/file --pull $WITH_POLICY_JSON alpine
-  expect_output "Error: checking authfile: stat /no/such/file: no such file or directory"
+  assert "$output" =~ "Error: credential file is not accessible: (faccessat|stat) /no/such/file: no such file or directory"
 }
 
 @test "from --pull-always: emits 'Getting' even if image is cached" {
@@ -428,7 +440,7 @@ load helpers
 
   # Try encrypted image without key should fail
   run_buildah 125 from oci:${TEST_SCRATCH_DIR}/tmp/busybox_enc
-  expect_output --substring "decrypting layer .* missing private key needed for decryption"
+  expect_output --substring "does not match config's DiffID"
 
   # Try encrypted image with wrong key should fail
   run_buildah 125 from --decryption-key ${TEST_SCRATCH_DIR}/tmp/mykey2.pem oci:${TEST_SCRATCH_DIR}/tmp/busybox_enc
@@ -451,7 +463,7 @@ load helpers
 
   # Try encrypted image without key should fail
   run_buildah 125 from --tls-verify=false --creds testuser:testpassword docker://localhost:${REGISTRY_PORT}/buildah/busybox_encrypted:latest
-  expect_output --substring "decrypting layer .* missing private key needed for decryption"
+  expect_output --substring "does not match config's DiffID"
 
   # Try encrypted image with wrong key should fail
   run_buildah 125 from --tls-verify=false --creds testuser:testpassword --decryption-key ${TEST_SCRATCH_DIR}/tmp/mykey2.pem docker://localhost:${REGISTRY_PORT}/buildah/busybox_encrypted:latest

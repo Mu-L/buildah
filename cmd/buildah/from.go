@@ -4,18 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/containers/buildah"
-	"github.com/containers/buildah/define"
-	"github.com/containers/buildah/internal/util"
-	buildahcli "github.com/containers/buildah/pkg/cli"
+	"github.com/containers/buildah/pkg/cli"
 	"github.com/containers/buildah/pkg/parse"
 	"github.com/containers/common/pkg/auth"
-	"github.com/containers/common/pkg/config"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -33,9 +29,9 @@ type fromReply struct {
 	quiet           bool
 	signaturePolicy string
 	tlsVerify       bool
-	*buildahcli.FromAndBudResults
-	*buildahcli.UserNSResults
-	*buildahcli.NameSpaceResults
+	*cli.FromAndBudResults
+	*cli.UserNSResults
+	*cli.NameSpaceResults
 }
 
 var suffix string
@@ -45,9 +41,9 @@ func init() {
 		fromDescription = "\n  Creates a new working container, either from scratch or using a specified\n  image as a starting point."
 		opts            fromReply
 	)
-	fromAndBudResults := buildahcli.FromAndBudResults{}
-	userNSResults := buildahcli.UserNSResults{}
-	namespaceResults := buildahcli.NameSpaceResults{}
+	fromAndBudResults := cli.FromAndBudResults{}
+	userNSResults := cli.UserNSResults{}
+	namespaceResults := cli.NameSpaceResults{}
 	fromCommand := &cobra.Command{
 		Use:   "from",
 		Short: "Create a working container based on an image",
@@ -73,8 +69,13 @@ func init() {
 	flags.StringVar(&opts.creds, "creds", "", "use `[username[:password]]` for accessing the registry")
 	flags.StringVarP(&opts.format, "format", "f", defaultFormat(), "`format` of the image manifest and metadata")
 	flags.StringVar(&opts.name, "name", "", "`name` for the working container")
-	flags.StringVar(&opts.pull, "pull", "true", "pull the image from the registry if newer or not present in store, if false, only pull the image if not present, if always, pull the image even if the named image is present in store, if never, only use the image present in store if available")
-	flags.Lookup("pull").NoOptDefVal = "true" //allow `--pull ` to be set to `true` as expected.
+	flags.StringVar(&opts.pull, "pull", "missing", `pull images from the registry values:
+always: pull images even if the named images are present in store,
+missing: pull images if the named images are not present in store,
+never: only use images present in store if available,
+newer: only pull images when newer images exist on the registry than those in the store.`)
+
+	flags.Lookup("pull").NoOptDefVal = "true" // allow `--pull ` to be set to `true` as expected.
 
 	flags.BoolVar(&opts.pullAlways, "pull-always", false, "pull the image even if the named image is present in store")
 	if err := flags.MarkHidden("pull-always"); err != nil {
@@ -97,13 +98,13 @@ func init() {
 	flags.BoolVar(&opts.tlsVerify, "tls-verify", true, "require HTTPS and verify certificates when accessing the registry. TLS verification cannot be used when talking to an insecure registry.")
 
 	// Add in the common flags
-	fromAndBudFlags, err := buildahcli.GetFromAndBudFlags(&fromAndBudResults, &userNSResults, &namespaceResults)
+	fromAndBudFlags, err := cli.GetFromAndBudFlags(&fromAndBudResults, &userNSResults, &namespaceResults)
 	if err != nil {
 		logrus.Errorf("failed to setup From and Bud flags: %v", err)
 		os.Exit(1)
 	}
 	flags.AddFlagSet(&fromAndBudFlags)
-	flags.SetNormalizeFunc(buildahcli.AliasFlags)
+	flags.SetNormalizeFunc(cli.AliasFlags)
 
 	rootCmd.AddCommand(fromCommand)
 }
@@ -166,7 +167,7 @@ func onBuild(builder *buildah.Builder, quiet bool) error {
 		case "RUN":
 			var stdout io.Writer
 			if quiet {
-				stdout = ioutil.Discard
+				stdout = io.Discard
 			}
 			if err := builder.Run(args, buildah.RunOptions{Stdout: stdout}); err != nil {
 				return err
@@ -190,15 +191,10 @@ func onBuild(builder *buildah.Builder, quiet bool) error {
 }
 
 func fromCmd(c *cobra.Command, args []string, iopts fromReply) error {
-	defaultContainerConfig, err := config.Default()
-	if err != nil {
-		return fmt.Errorf("failed to get container config: %w", err)
-	}
-
 	if len(args) == 0 {
 		return errors.New("an image name (or \"scratch\") must be specified")
 	}
-	if err := buildahcli.VerifyFlagsArgsOrder(args); err != nil {
+	if err := cli.VerifyFlagsArgsOrder(args); err != nil {
 		return err
 	}
 	if len(args) > 1 {
@@ -220,35 +216,10 @@ func fromCmd(c *cobra.Command, args []string, iopts fromReply) error {
 		logrus.Warnf("ignoring platforms other than %+v: %+v", platforms[0], platforms[1:])
 	}
 
-	pullFlagsCount := 0
-	if c.Flag("pull").Changed {
-		pullFlagsCount++
+	pullPolicy, err := parse.PullPolicyFromOptions(c)
+	if err != nil {
+		return err
 	}
-	if c.Flag("pull-always").Changed {
-		pullFlagsCount++
-	}
-	if c.Flag("pull-never").Changed {
-		pullFlagsCount++
-	}
-
-	if pullFlagsCount > 1 {
-		return errors.New("can only set one of 'pull' or 'pull-always' or 'pull-never'")
-	}
-
-	// Allow for --pull, --pull=true, --pull=false, --pull=never, --pull=always
-	// --pull-always and --pull-never.  The --pull-never and --pull-always options
-	// will not be documented.
-	pullPolicy := define.PullIfMissing
-	if strings.EqualFold(strings.TrimSpace(iopts.pull), "true") {
-		pullPolicy = define.PullIfNewer
-	}
-	if iopts.pullAlways || strings.EqualFold(strings.TrimSpace(iopts.pull), "always") {
-		pullPolicy = define.PullAlways
-	}
-	if iopts.pullNever || strings.EqualFold(strings.TrimSpace(iopts.pull), "never") {
-		pullPolicy = define.PullNever
-	}
-	logrus.Debugf("Pull Policy for pull [%v]", pullPolicy)
 
 	signaturePolicy := iopts.signaturePolicy
 
@@ -277,17 +248,9 @@ func fromCmd(c *cobra.Command, args []string, iopts fromReply) error {
 	}
 	namespaceOptions.AddOrReplace(usernsOption...)
 
-	format, err := util.GetFormat(iopts.format)
+	format, err := cli.GetFormat(iopts.format)
 	if err != nil {
 		return err
-	}
-	devices := define.ContainerDevices{}
-	for _, device := range append(defaultContainerConfig.Containers.Devices, iopts.Devices...) {
-		dev, err := parse.DeviceFromPath(device)
-		if err != nil {
-			return err
-		}
-		devices = append(devices, dev...)
 	}
 
 	capabilities, err := defaultContainerConfig.Capabilities("", iopts.CapAdd, iopts.CapDrop)
@@ -295,23 +258,18 @@ func fromCmd(c *cobra.Command, args []string, iopts fromReply) error {
 		return err
 	}
 
-	commonOpts.Ulimit = append(defaultContainerConfig.Containers.DefaultUlimits, commonOpts.Ulimit...)
+	commonOpts.Ulimit = append(defaultContainerConfig.Containers.DefaultUlimits.Get(), commonOpts.Ulimit...)
 
-	decConfig, err := util.DecryptConfig(iopts.DecryptionKeys)
+	decConfig, err := cli.DecryptConfig(iopts.DecryptionKeys)
 	if err != nil {
 		return fmt.Errorf("unable to obtain decrypt config: %w", err)
-	}
-
-	var pullPushRetryDelay time.Duration
-	pullPushRetryDelay, err = time.ParseDuration(iopts.RetryDelay)
-	if err != nil {
-		return fmt.Errorf("unable to parse value provided %q as --retry-delay: %w", iopts.RetryDelay, err)
 	}
 
 	options := buildah.BuilderOptions{
 		FromImage:             args[0],
 		Container:             iopts.name,
 		ContainerSuffix:       suffix,
+		GroupAdd:              iopts.GroupAdd,
 		PullPolicy:            pullPolicy,
 		SignaturePolicyPath:   signaturePolicy,
 		SystemContext:         systemContext,
@@ -326,10 +284,17 @@ func fromCmd(c *cobra.Command, args []string, iopts fromReply) error {
 		CommonBuildOpts:       commonOpts,
 		Format:                format,
 		BlobDirectory:         iopts.BlobCache,
-		Devices:               devices,
+		DeviceSpecs:           iopts.Devices,
 		MaxPullRetries:        iopts.Retry,
-		PullRetryDelay:        pullPushRetryDelay,
 		OciDecryptConfig:      decConfig,
+		CDIConfigDir:          iopts.CDIConfigDir,
+	}
+
+	if iopts.RetryDelay != "" {
+		options.PullRetryDelay, err = time.ParseDuration(iopts.RetryDelay)
+		if err != nil {
+			return fmt.Errorf("unable to parse value provided %q as --retry-delay: %w", iopts.RetryDelay, err)
+		}
 	}
 
 	if !iopts.quiet {
@@ -347,7 +312,7 @@ func fromCmd(c *cobra.Command, args []string, iopts fromReply) error {
 
 	if iopts.cidfile != "" {
 		filePath := iopts.cidfile
-		if err := ioutil.WriteFile(filePath, []byte(builder.ContainerID), 0644); err != nil {
+		if err := os.WriteFile(filePath, []byte(builder.ContainerID), 0o644); err != nil {
 			return fmt.Errorf("failed to write container ID file %q: %w", filePath, err)
 		}
 	}

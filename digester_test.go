@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"io"
-	"io/ioutil"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +25,7 @@ func (c *CompositeDigester) isOpen() bool {
 }
 
 func TestCompositeDigester(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		itemTypes  []string
@@ -134,7 +134,7 @@ func TestCompositeDigester(t *testing.T) {
 						hdr := &tar.Header{
 							Name:     "content",
 							Size:     size,
-							Mode:     0640,
+							Mode:     0o640,
 							ModTime:  time.Now(),
 							Typeflag: tar.TypeReg,
 						}
@@ -167,7 +167,7 @@ func TestCompositeDigester(t *testing.T) {
 								// the filter should have left modtime to "roughly now"
 								require.NotEqual(t, zero, hdr.ModTime, "timestamp for entry should not have been zero")
 							}
-							n, err = io.Copy(ioutil.Discard, tr)
+							n, err = io.Copy(io.Discard, tr)
 							require.Nil(t, err, "error reading tar content from buffer: %v", err)
 							require.Equal(t, hdr.Size, n, "short read reading tar content")
 							hdr, err = tr.Next()
@@ -187,6 +187,7 @@ func TestCompositeDigester(t *testing.T) {
 }
 
 func TestTarFilterer(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		input, output map[string]string

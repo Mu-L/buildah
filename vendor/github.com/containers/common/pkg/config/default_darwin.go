@@ -14,5 +14,20 @@ func getLibpodTmpDir() string {
 
 // getDefaultMachineVolumes returns default mounted volumes (possibly with env vars, which will be expanded)
 func getDefaultMachineVolumes() []string {
-	return []string{"$HOME:$HOME"}
+	return []string{
+		"/Users:/Users",
+		"/private:/private",
+		"/var/folders:/var/folders",
+	}
+}
+
+func getDefaultComposeProviders() []string {
+	return []string{
+		"docker-compose",
+		"$HOME/.docker/cli-plugins/docker-compose",
+		"/opt/homebrew/bin/docker-compose",
+		"/usr/local/bin/docker-compose",
+		"/Applications/Docker.app/Contents/Resources/cli-plugins/docker-compose",
+		"podman-compose",
+	}
 }

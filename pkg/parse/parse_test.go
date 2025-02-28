@@ -10,9 +10,11 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCommonBuildOptionsFromFlagSet(t *testing.T) {
+	t.Parallel()
 	fs := pflag.NewFlagSet("testme", pflag.PanicOnError)
 	fs.String("memory", "1GB", "")
 	fs.String("shm-size", "5TB", "")
@@ -28,6 +30,7 @@ func TestCommonBuildOptionsFromFlagSet(t *testing.T) {
 
 // TestDeviceParser verifies the given device strings is parsed correctly
 func TestDeviceParser(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("Devices is only supported on Linux")
 	}
@@ -60,7 +63,7 @@ func TestDeviceParser(t *testing.T) {
 	assert.Equal(t, dest, "/dev/foo")
 	assert.Equal(t, permissions, "rm")
 
-	//test bogus permissions
+	// test bogus permissions
 	_, _, _, err = Device("/dev/fuse1:BOGUS")
 	assert.Error(t, err)
 
@@ -75,6 +78,7 @@ func TestDeviceParser(t *testing.T) {
 }
 
 func TestIsValidDeviceMode(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("Devices is only supported on Linux")
 	}
@@ -87,6 +91,7 @@ func TestIsValidDeviceMode(t *testing.T) {
 }
 
 func TestDeviceFromPath(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("Devices is only supported on Linux")
 	}
@@ -114,6 +119,7 @@ func TestDeviceFromPath(t *testing.T) {
 }
 
 func TestIDMappingOptions(t *testing.T) {
+	t.Parallel()
 	fs := pflag.NewFlagSet("testme", pflag.PanicOnError)
 	pfs := pflag.NewFlagSet("persist", pflag.PanicOnError)
 	fs.String("userns-uid-map-user", "", "")
@@ -133,6 +139,7 @@ func TestIDMappingOptions(t *testing.T) {
 }
 
 func TestIsolation(t *testing.T) {
+	t.Parallel()
 	def, err := defaultIsolation()
 	if err != nil {
 		assert.Error(t, err)
@@ -161,6 +168,7 @@ func TestIsolation(t *testing.T) {
 }
 
 func TestNamespaceOptions(t *testing.T) {
+	t.Parallel()
 	fs := pflag.NewFlagSet("testme", pflag.PanicOnError)
 	fs.String("cgroupns", "", "")
 	err := fs.Parse([]string{"--cgroupns", "private"})
@@ -175,6 +183,7 @@ func TestNamespaceOptions(t *testing.T) {
 }
 
 func TestParsePlatform(t *testing.T) {
+	t.Parallel()
 	os, arch, variant, err := Platform("a/b/c")
 	assert.NoError(t, err)
 	assert.NoError(t, err)
@@ -193,7 +202,35 @@ func TestParsePlatform(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestParsePullPolicy(t *testing.T) {
+	t.Parallel()
+	testCases := map[string]bool{
+		"missing":    true,
+		"ifmissing":  true,
+		"notpresent": true,
+		"always":     true,
+		"true":       true,
+		"ifnewer":    true,
+		"newer":      true,
+		"false":      true,
+		"never":      true,
+		"try":        false,
+		"truth":      false,
+	}
+	for value, result := range testCases {
+		t.Run(value, func(t *testing.T) {
+			policy, err := pullPolicyWithFlags(value, false, false)
+			if result {
+				require.NoErrorf(t, err, "expected value %q to be recognized", value)
+			} else {
+				require.Errorf(t, err, "did not expect value %q to be recognized as %q", value, policy.String())
+			}
+		})
+	}
+}
+
 func TestSplitStringWithColonEscape(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		volume         string
 		expectedResult []string
@@ -210,6 +247,7 @@ func TestSplitStringWithColonEscape(t *testing.T) {
 }
 
 func TestSystemContextFromFlagSet(t *testing.T) {
+	t.Parallel()
 	fs := pflag.NewFlagSet("testme", pflag.PanicOnError)
 	fs.Bool("tls-verify", false, "")
 	err := fs.Parse([]string{"--tls-verify", "false"})

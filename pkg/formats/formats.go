@@ -10,8 +10,8 @@ import (
 	"text/tabwriter"
 	"text/template"
 
-	"github.com/ghodss/yaml"
 	"golang.org/x/term"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -131,7 +131,7 @@ func (j JSONStruct) Out() error {
 	return nil
 }
 
-//Out method for Go templates
+// Out method for Go templates
 func (t StdoutTemplate) Out() error {
 	tmpl, err := template.New("image").Parse(t.Template)
 	if err != nil {

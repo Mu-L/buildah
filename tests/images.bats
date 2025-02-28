@@ -138,7 +138,7 @@ load helpers
 
   run_buildah images --json
   run python3 -m json.tool <<< "$output"
-  [ "${status}" -eq 0 ]
+  assert "$status" -eq 0 "status from python json.tool"
 }
 
 @test "specify an existing image" {
@@ -269,4 +269,20 @@ EOF
   run_buildah inspect ${configdigest}
   # List images.  We shouldn't crash.
   run_buildah images
+}
+
+
+@test "Test two image names" {
+  _prefetch alpine busybox
+  run_buildah from --quiet --pull=false $WITH_POLICY_JSON alpine
+  run_buildah from --quiet --pull=false $WITH_POLICY_JSON busybox
+
+  run_buildah 125 images --filter dangling=true alpine busybox
+  expect_output "Error: 'buildah images' requires at most 1 argument"
+
+  run_buildah 125 images alpine busybox
+  expect_output "Error: 'buildah images' requires at most 1 argument"
+
+  run_buildah 125 images --noheading alpine busybox
+  expect_output "Error: 'buildah images' requires at most 1 argument"
 }
