@@ -30,10 +30,9 @@ import (
 	"github.com/containers/buildah/define"
 	"github.com/containers/buildah/imagebuildah"
 	"github.com/containers/buildah/internal/config"
-	dockerapi "github.com/docker/docker/api"
-	dockerbuildtypes "github.com/docker/docker/api/types/build"
-	dockerdockerclient "github.com/docker/docker/client"
 	docker "github.com/fsouza/go-dockerclient"
+	dockerdockerclient "github.com/moby/moby/client"
+	"github.com/moby/moby/client/pkg/versions"
 	digest "github.com/opencontainers/go-digest"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/openshift/imagebuilder"
@@ -332,17 +331,32 @@ func testConformanceInternal(t *testing.T, dateStamp string, testIndex int, muta
 	}
 
 	// connect to dockerd using the docker client library
-	dockerClient, err := dockerdockerclient.NewClientWithOpts(dockerdockerclient.FromEnv)
+	dockerClient, err := dockerdockerclient.New(dockerdockerclient.FromEnv)
 	require.NoError(t, err, "unable to initialize docker.client")
-	dockerClient.NegotiateAPIVersion(ctx)
+	_, err = dockerClient.Ping(ctx, dockerdockerclient.PingOptions{
+		NegotiateAPIVersion: true,
+	})
+	require.NoError(t, err)
 	if test.dockerUseBuildKit || test.dockerBuilderVersion != "" {
-		if err := dockerClient.NewVersionError(ctx, "1.38", "buildkit"); err != nil {
-			t.Skipf("%v", err)
+		negotiatedVersion := dockerClient.ClientVersion()
+		if versions.LessThan(negotiatedVersion, "1.38") {
+			t.Skipf("negotiated version %q is too low", err)
 		}
 	}
 
 	// connect to dockerd using go-dockerclient
-	client, err := docker.NewVersionedClientFromEnv(dockerapi.DefaultVersion)
+	// Later, the client.BuildImage implementation chooses an API version based on
+	// fields set in docker.BuildImageOptions. Because we don’t use _so_ new features,
+	// that can use a fairly old version.
+	//
+	// If we don’t want this old version to be used, we must specify a version ourselves
+	// (the API requries it to be specified when initializing the client). We could create
+	// a client only to call .Version() and then create another client witht the discovered version,
+	// but that’s not really any more correct.
+	//
+	// As of 2026-02, the client is choosing 1.39, while our server supports 1.44–1.52.
+	// Previously we used 1.51, so let’s hard-code that.
+	client, err := docker.NewVersionedClientFromEnv("1.51")
 	require.NoError(t, err, "unable to initialize docker client")
 	var dockerVersion []string
 	if version, err := client.Version(); err == nil {
@@ -754,7 +768,7 @@ func buildUsingDocker(ctx context.Context, t *testing.T, client *docker.Client, 
 	if err != nil {
 		output.WriteString("\n" + err.Error())
 	}
-	if _, err := dockerClient.BuildCachePrune(ctx, dockerbuildtypes.CachePruneOptions{All: true}); err != nil {
+	if _, err := dockerClient.BuildCachePrune(ctx, dockerdockerclient.BuildCachePruneOptions{All: true}); err != nil {
 		t.Logf("docker build cache prune: %v", err)
 	}
 
