@@ -31,7 +31,7 @@ import (
 	"github.com/containers/buildah/imagebuildah"
 	"github.com/containers/buildah/internal/config"
 	docker "github.com/fsouza/go-dockerclient"
-	dockerdockerclient "github.com/moby/moby/client"
+	mobyclient "github.com/moby/moby/client"
 	"github.com/moby/moby/client/pkg/versions"
 	digest "github.com/opencontainers/go-digest"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
@@ -331,14 +331,14 @@ func testConformanceInternal(t *testing.T, dateStamp string, testIndex int, muta
 	}
 
 	// connect to dockerd using the docker client library
-	dockerClient, err := dockerdockerclient.New(dockerdockerclient.FromEnv)
+	mobyClient, err := mobyclient.New(mobyclient.FromEnv)
 	require.NoError(t, err, "unable to initialize docker.client")
-	_, err = dockerClient.Ping(ctx, dockerdockerclient.PingOptions{
+	_, err = mobyClient.Ping(ctx, mobyclient.PingOptions{
 		NegotiateAPIVersion: true,
 	})
 	require.NoError(t, err)
 	if test.dockerUseBuildKit || test.dockerBuilderVersion != "" {
-		negotiatedVersion := dockerClient.ClientVersion()
+		negotiatedVersion := mobyClient.ClientVersion()
 		if versions.LessThan(negotiatedVersion, "1.38") {
 			t.Skipf("negotiated version %q is too low", err)
 		}
@@ -386,7 +386,7 @@ func testConformanceInternal(t *testing.T, dateStamp string, testIndex int, muta
 				if line > 1 || !bytes.HasPrefix(dockerfileContents, []byte("FROM ")) {
 					// hack: skip trying to build just the first FROM line
 					t.Run(fmt.Sprintf("%d", line), func(t *testing.T) {
-						testConformanceInternalBuild(ctx, t, cwd, store, client, dockerClient, fmt.Sprintf("%s.%d", buildahImage, line), fmt.Sprintf("%s.%d", dockerImage, line), fmt.Sprintf("%s.%d", imagebuilderImage, line), contextDir, dockerfileName, dockerfileContents[:i+1], test, line, i == len(dockerfileContents)-1, dockerVersion)
+						testConformanceInternalBuild(ctx, t, cwd, store, client, mobyClient, fmt.Sprintf("%s.%d", buildahImage, line), fmt.Sprintf("%s.%d", dockerImage, line), fmt.Sprintf("%s.%d", imagebuilderImage, line), contextDir, dockerfileName, dockerfileContents[:i+1], test, line, i == len(dockerfileContents)-1, dockerVersion)
 					})
 				}
 				line++
@@ -394,11 +394,11 @@ func testConformanceInternal(t *testing.T, dateStamp string, testIndex int, muta
 		}
 	} else {
 		// build to completion
-		testConformanceInternalBuild(ctx, t, cwd, store, client, dockerClient, buildahImage, dockerImage, imagebuilderImage, contextDir, dockerfileName, dockerfileContents, test, 0, true, dockerVersion)
+		testConformanceInternalBuild(ctx, t, cwd, store, client, mobyClient, buildahImage, dockerImage, imagebuilderImage, contextDir, dockerfileName, dockerfileContents, test, 0, true, dockerVersion)
 	}
 }
 
-func testConformanceInternalBuild(ctx context.Context, t *testing.T, cwd string, store storage.Store, client *docker.Client, dockerClient *dockerdockerclient.Client, buildahImage, dockerImage, imagebuilderImage, contextDir, dockerfileName string, dockerfileContents []byte, test testCase, line int, finalOfSeveral bool, dockerVersion []string) {
+func testConformanceInternalBuild(ctx context.Context, t *testing.T, cwd string, store storage.Store, client *docker.Client, mobyClient *mobyclient.Client, buildahImage, dockerImage, imagebuilderImage, contextDir, dockerfileName string, dockerfileContents []byte, test testCase, line int, finalOfSeveral bool, dockerVersion []string) {
 	var buildahLog, dockerLog, imagebuilderLog []byte
 	var buildahRef, dockerRef, imagebuilderRef types.ImageReference
 
@@ -437,7 +437,7 @@ func testConformanceInternalBuild(ctx context.Context, t *testing.T, cwd string,
 
 	// build using docker
 	if !test.withoutDocker {
-		dockerRef, dockerLog = buildUsingDocker(ctx, t, client, dockerClient, test, dockerImage, contextDir, dockerfileName, line, finalOfSeveral)
+		dockerRef, dockerLog = buildUsingDocker(ctx, t, client, mobyClient, test, dockerImage, contextDir, dockerfileName, line, finalOfSeveral)
 		if dockerRef != nil {
 			defer func() {
 				err := client.RemoveImageExtended(dockerImage, docker.RemoveImageOptions{
@@ -680,7 +680,7 @@ func pullImageIfMissing(t *testing.T, client *docker.Client, image string) {
 	}
 }
 
-func buildUsingDocker(ctx context.Context, t *testing.T, client *docker.Client, dockerClient *dockerdockerclient.Client, test testCase, dockerImage, contextDir, dockerfileName string, line int, finalOfSeveral bool) (dockerRef types.ImageReference, dockerLog []byte) {
+func buildUsingDocker(ctx context.Context, t *testing.T, client *docker.Client, mobyClient *mobyclient.Client, test testCase, dockerImage, contextDir, dockerfileName string, line int, finalOfSeveral bool) (dockerRef types.ImageReference, dockerLog []byte) {
 	// compute the path of the dockerfile relative to the build context
 	dockerfileRelativePath, err := filepath.Rel(contextDir, dockerfileName)
 	require.NoErrorf(t, err, "unable to compute path of dockerfile %q relative to context directory %q", dockerfileName, contextDir)
@@ -768,7 +768,7 @@ func buildUsingDocker(ctx context.Context, t *testing.T, client *docker.Client, 
 	if err != nil {
 		output.WriteString("\n" + err.Error())
 	}
-	if _, err := dockerClient.BuildCachePrune(ctx, dockerdockerclient.BuildCachePruneOptions{All: true}); err != nil {
+	if _, err := mobyClient.BuildCachePrune(ctx, mobyclient.BuildCachePruneOptions{All: true}); err != nil {
 		t.Logf("docker build cache prune: %v", err)
 	}
 
