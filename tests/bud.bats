@@ -9490,3 +9490,31 @@ _EOF
   assert $status = 0 "checking datestamp on newfile"
   assert "$output" = "$source_date_epoch" "newfile should be clamped to source-date-epoch (expected ${source_date_epoch}, got ${output})"
 }
+
+@test "use-secret-to-env-variable" {
+  local outpath="${TEST_SCRATCH_DIR}/timestamp-after-secret.tar"
+
+  BAR=baz run_buildah build --secret id=mysecret,env=BAR -f <(printf "FROM alpine\nRUN --mount=type=secret,id=mysecret,env=FOO,required sh -c 'echo "'"Hello $FOO"'"'") --tag=oci-archive:${outpath}.a --timestamp 0
+  expect_output --substring "Hello baz"
+  BAR=boz run_buildah build --secret id=mysecret,env=BAR -f <(printf "FROM alpine\nRUN --mount=type=secret,id=mysecret,env=FOO,required sh -c 'echo "'"Hello $FOO"'"'") --tag=oci-archive:${outpath}.b --timestamp 0
+  expect_output --substring "Hello boz"
+
+  # even though different secret was passed to each(baz vs boz), we expect the same result, ie should not affect build history
+  diff "${outpath}.a" "${outpath}.b"
+}
+
+@test "use-secret-to-env-variable-and-file-path" {
+  local outpath="${TEST_SCRATCH_DIR}/timestamp-after-secret-and-path.tar"
+
+  # here we mount the secret as both an env variable AND at a file path
+  # neither of which should affect the build history
+
+  BAR=baz run_buildah build --secret id=mysecret,env=BAR -f <(printf "FROM alpine\nRUN --mount=type=secret,id=mysecret,env=FOO,target=/foo,required sh -c 'echo -n "'"Hello $FOO "'" && cat /foo'") --tag=oci-archive:${outpath}.a --timestamp 0
+  expect_output --substring "Hello baz baz"
+
+  BAR=boz run_buildah build --secret id=mysecret,env=BAR -f <(printf "FROM alpine\nRUN --mount=type=secret,id=mysecret,env=FOO,target=/foo,required sh -c 'echo -n "'"Hello $FOO "'" && cat /foo'") --tag=oci-archive:${outpath}.b --timestamp 0
+  expect_output --substring "Hello boz boz"
+
+  # even though different secret was passed to each(baz vs boz), we expect the same result, ie should not affect build history
+  diff "${outpath}.a" "${outpath}.b"
+}
