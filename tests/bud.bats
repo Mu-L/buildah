@@ -569,6 +569,9 @@ _EOF
 
   run_buildah 125 build --network=none --isolation=chroot $WITH_POLICY_JSON ${TEST_SCRATCH_DIR}
   expect_output --substring "cannot set --network other than host with --isolation chroot"
+
+  BUILDAH_ISOLATION=chroot run_buildah 125 build --network=none $WITH_POLICY_JSON ${TEST_SCRATCH_DIR}
+  expect_output --substring "cannot set --network other than host with --isolation chroot"
 }
 
 @test "bud with .dockerignore #1" {
@@ -5772,6 +5775,7 @@ EOF
 }
 
 @test "bud with network options" {
+  skip_if_chroot
   _prefetch alpine
   target=alpine-image
 
@@ -6536,6 +6540,7 @@ _EOF
 
 @test "bud with --no-hostname" {
   skip_if_no_runtime
+  skip_if_chroot
 
   _prefetch alpine
 
